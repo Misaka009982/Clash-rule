@@ -84,20 +84,35 @@ def process_custom_link():
 # 处理 blackmatrix7 仓库中的规则
 def process_rule_file(rule_dir):
     rule_name = rule_dir['name']
-    yaml_url = f"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/{rule_name}/{rule_name}.list"
+    yaml_url = f"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/{rule_name}/{rule_name}.yaml"
+    list_url = f"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/{rule_name}/{rule_name}.list"
     
     try:
+        # 先尝试获取 yaml 文件
         response = requests.get(yaml_url)
-        if response.status_code != 200:
-            print(f"无法下载 {rule_name}.yaml: HTTP {response.status_code}")
-            return
         
-        # 解析YAML
-        try:
-            rule_data = yaml.safe_load(response.text)
-        except yaml.YAMLError:
-            print(f"解析 {rule_name}.yaml 失败")
-            return
+        # 如果 yaml 文件不存在，则尝试获取 list 文件
+        if response.status_code != 200:
+            print(f"无法下载 {rule_name}.yaml: HTTP {response.status_code}，尝试下载 {rule_name}.list")
+            response = requests.get(list_url)
+            
+            if response.status_code != 200:
+                print(f"无法下载 {rule_name}.list: HTTP {response.status_code}")
+                return
+            
+            # 解析 list 文件
+            rule_data = {"payload": []}
+            for line in response.text.splitlines():
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    rule_data["payload"].append(line)
+        else:
+            # 解析 YAML 文件
+            try:
+                rule_data = yaml.safe_load(response.text)
+            except yaml.YAMLError:
+                print(f"解析 {rule_name}.yaml 失败")
+                return
         
         # 初始化域名和IP列表
         domains = []
