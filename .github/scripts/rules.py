@@ -84,7 +84,7 @@ def process_custom_link():
 # 处理 blackmatrix7 仓库中的规则
 def process_rule_file(rule_dir):
     rule_name = rule_dir['name']
-    yaml_url = f"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/{rule_name}/{rule_name}.yaml"
+    yaml_url = f"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/{rule_name}/{rule_name}.list"
     
     try:
         response = requests.get(yaml_url)
