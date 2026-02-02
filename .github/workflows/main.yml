@@ -30,7 +30,7 @@ jobs:
           echo "Fetching latest mihomo release info..."
           API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 
-          ASSET_URL=$(curl -fsSL $API_URL \
+          ASSET_URL=$(curl -fsSL "$API_URL" \
           | grep browser_download_url \
           | grep linux-amd64 \
           | grep -v sha256 \
@@ -39,7 +39,12 @@ jobs:
 
           echo "Downloading: $ASSET_URL"
 
-          curl -fL "$ASSET_URL" -o /usr/local/bin/mihomo
+          curl -fL "$ASSET_URL" -o /tmp/mihomo.gz
+
+          echo "Decompressing..."
+          gunzip /tmp/mihomo.gz
+
+          mv /tmp/mihomo /usr/local/bin/mihomo
           chmod +x /usr/local/bin/mihomo
 
           file /usr/local/bin/mihomo
