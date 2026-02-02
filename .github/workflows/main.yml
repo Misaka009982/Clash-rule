@@ -36,9 +36,9 @@ jobs:
           mv /tmp/mihomo /usr/local/bin/mihomo
           chmod +x /usr/local/bin/mihomo
 
-          # ✅ 只验证 CLI，不启动核心
-          mihomo convert-ruleset --help >/dev/null
-
+          # ✅ 用最小规则测试 convert-ruleset（不会启动核心）
+          echo "example.com" > /tmp/test.txt
+          mihomo convert-ruleset domain text /tmp/test.txt /tmp/test.mrs
 
 
       - name: Run rules script
