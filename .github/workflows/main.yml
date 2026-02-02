@@ -25,10 +25,13 @@ jobs:
 
       - name: Install mihomo
         run: |
-          curl -L https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64 \
-            -o /usr/local/bin/mihomo
+          set -e
+          curl -fL https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-compatible \
+          -o /usr/local/bin/mihomo
+          file /usr/local/bin/mihomo
           chmod +x /usr/local/bin/mihomo
-          mihomo -v
+          mihomo version
+
 
       - name: Run rules script
         run: |
