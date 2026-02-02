@@ -72,6 +72,17 @@ jobs:
             convert ipcidr "$d/ipcidr.list" "$d/ipcidr.mrs" || true
           done
 
+          echo "=== Convert Rule/Other flat rules ==="
+          for f in Rule/Other/*-domains.list; do
+          [ -f "$f" ] || continue
+          convert domain "$f" "${f%.list}.mrs"
+          done
+
+          for f in Rule/Other/*-ipcidr.list; do
+          [ -f "$f" ] || continue
+          convert ipcidr "$f" "${f%.list}.mrs"
+          done
+
       - name: Commit & Push
         run: |
           git config user.name github-actions
