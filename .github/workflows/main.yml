@@ -26,10 +26,23 @@ jobs:
       - name: Install mihomo
         run: |
           set -e
-          curl -fL https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-compatible \
-          -o /usr/local/bin/mihomo
-          file /usr/local/bin/mihomo
+
+          echo "Fetching latest mihomo release info..."
+          API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+
+          ASSET_URL=$(curl -fsSL $API_URL \
+          | grep browser_download_url \
+          | grep linux-amd64 \
+          | grep -v sha256 \
+          | head -n 1 \
+          | cut -d '"' -f 4)
+
+          echo "Downloading: $ASSET_URL"
+
+          curl -fL "$ASSET_URL" -o /usr/local/bin/mihomo
           chmod +x /usr/local/bin/mihomo
+
+          file /usr/local/bin/mihomo
           mihomo version
 
 
