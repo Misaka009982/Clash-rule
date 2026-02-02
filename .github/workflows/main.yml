@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,45 +21,52 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests ruamel.yaml
-
+          pip install requests ruamel.yaml pyyaml
 
       - name: Install mihomo
         run: |
           set -e
-
-          API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
-
-          ASSET_URL=$(curl -fsSL "$API_URL" \
-          | grep browser_download_url \
-          | grep linux-amd64 \
-          | grep -v sha256 \
-          | head -n 1 \
-          | cut -d '"' -f 4)
-
-          curl -fL "$ASSET_URL" -o /tmp/mihomo.gz
-          gunzip /tmp/mihomo.gz
-          mv /tmp/mihomo /usr/local/bin/mihomo
+          echo "Fetching latest mihomo release info..."
+          VERSION=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r .tag_name)
+          URL="https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-compatible-${VERSION}.gz"
+          echo "Downloading: $URL"
+          curl -L "$URL" -o /usr/local/bin/mihomo.gz
+          gunzip /usr/local/bin/mihomo.gz
           chmod +x /usr/local/bin/mihomo
+          mihomo -v
 
-          # ✅ 用最小规则测试 convert-ruleset（不会启动核心）
-          echo "example.com" > /tmp/test.txt
-          mihomo convert-ruleset domain text /tmp/test.txt /tmp/test.mrs
-
-
-      - name: Run rules script
+      - name: Generate rule lists
         run: |
           python .github/scripts/rules.py
 
-      - name: Convert generated rules to MRS
+      - name: Convert rules to mrs (in-place)
         run: |
-          mkdir -p mrs
-          mihomo convert-ruleset domain text out/domain_rules.txt mrs/domain_rules.mrs
-          mihomo convert-ruleset ipcidr text out/ipcidr_rules.txt mrs/ipcidr_rules.mrs
+          set -e
 
-      - name: Commit output
-        uses: stefanzweifel/git-auto-commit-action@v5
+          for dir in Rule/*; do
+            [ -d "$dir" ] || continue
+            echo "Processing $(basename "$dir")"
+
+            # 清理旧 mrs，防止残留
+            rm -f "$dir"/*.mrs
+
+            if [ -s "$dir/domains.list" ]; then
+              echo "  → domains.list → domains.mrs"
+              mihomo convert-ruleset domain text \
+                "$dir/domains.list" \
+                "$dir/domains.mrs"
+            fi
+
+            if [ -s "$dir/ipcidr.list" ]; then
+              echo "  → ipcidr.list → ipcidr.mrs"
+              mihomo convert-ruleset ipcidr text \
+                "$dir/ipcidr.list" \
+                "$dir/ipcidr.mrs"
+            fi
+          done
+
+      - name: Upload Rule artifacts
+        uses: actions/upload-artifact@v4
         with:
-          commit_message: "Update mrs rules"
-          file_pattern: |
-            mrs/*
+          name: Clash-Rules
+          path: Rule/
