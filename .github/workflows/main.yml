@@ -5,19 +5,16 @@ on:
     - cron: "58 * * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -50,45 +47,32 @@ jobs:
           echo "example.com" > /tmp/test.txt
           mihomo convert-ruleset domain text /tmp/test.txt /tmp/test.mrs
 
-      - name: Convert to mrs
+      - name: Convert all rules (safe)
         run: |
           set -e
 
-          echo "=== Convert directory rules ==="
-          for dir in Rule/*; do
-            [ -d "$dir" ] || continue
-            [ "$(basename "$dir")" = "Other" ] && continue
+          convert() {
+            type="$1"
+            src="$2"
+            dst="$3"
 
-            echo "Processing $(basename "$dir")"
-
-            if [ -s "$dir/domains.list" ]; then
-              mihomo convert-ruleset domain text \
-                "$dir/domains.list" \
-                "$dir/domains.mrs"
+            if grep -q '[^[:space:]]' "$src"; then
+              mihomo convert-ruleset "$type" text "$src" "$dst"
+            else
+              echo "Skip empty $src"
             fi
+          }
 
-            if [ -s "$dir/ipcidr.list" ]; then
-              mihomo convert-ruleset ipcidr text \
-                "$dir/ipcidr.list" \
-                "$dir/ipcidr.mrs"
-            fi
-          done
-
-          echo "=== Convert Rule/Other flat rules ==="
-          for f in Rule/Other/*-domains.list; do
-            [ -s "$f" ] || continue
-            mihomo convert-ruleset domain text "$f" "${f%.list}.mrs"
-          done
-
-          for f in Rule/Other/*-ipcidr.list; do
-            [ -s "$f" ] || continue
-            mihomo convert-ruleset ipcidr text "$f" "${f%.list}.mrs"
+          for d in Rule/*; do
+            [ -d "$d" ] || continue
+            convert domain "$d/domains.list" "$d/domains.mrs" || true
+            convert ipcidr "$d/ipcidr.list" "$d/ipcidr.mrs" || true
           done
 
       - name: Commit & Push
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          git config user.name github-actions
+          git config user.email actions@github.com
           git add Rule
           git commit -m "Update rules" || exit 0
           git push
