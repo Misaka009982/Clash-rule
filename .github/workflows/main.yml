@@ -22,41 +22,27 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: |
-          pip install requests pyyaml
+        run: pip install requests pyyaml
 
       - name: Generate rules
-        run: |
-          python .github/scripts/rules.py
+        run: python .github/scripts/rules.py
 
       - name: Install mihomo
         run: |
-          set -e
-
-          API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
-
-          ASSET_URL=$(curl -fsSL "$API_URL" \
-          | grep browser_download_url \
-          | grep linux-amd64 \
-          | grep -v sha256 \
-          | head -n 1 \
-          | cut -d '"' -f 4)
-
-          curl -fL "$ASSET_URL" -o /tmp/mihomo.gz
-          gunzip /tmp/mihomo.gz
-          mv /tmp/mihomo /usr/local/bin/mihomo
-          chmod +x /usr/local/bin/mihomo
-
-
-          # ✅ 用最小规则测试 convert-ruleset（不会启动核心）
-          echo "example.com" > /tmp/test.txt
-          mihomo convert-ruleset domain text /tmp/test.txt /tmp/test.mrs
+          curl -L -o mihomo \
+            https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64
+          chmod +x mihomo
+          sudo mv mihomo /usr/local/bin/mihomo
 
       - name: Convert to mrs
         run: |
           set -e
+
+          echo "=== Convert directory rules ==="
           for dir in Rule/*; do
             [ -d "$dir" ] || continue
+            [ "$(basename "$dir")" = "Other" ] && continue
+
             echo "Processing $(basename "$dir")"
 
             if [ -s "$dir/domains.list" ]; then
@@ -70,6 +56,17 @@ jobs:
                 "$dir/ipcidr.list" \
                 "$dir/ipcidr.mrs"
             fi
+          done
+
+          echo "=== Convert Rule/Other flat rules ==="
+          for f in Rule/Other/*-domains.list; do
+            [ -s "$f" ] || continue
+            mihomo convert-ruleset domain text "$f" "${f%.list}.mrs"
+          done
+
+          for f in Rule/Other/*-ipcidr.list; do
+            [ -s "$f" ] || continue
+            mihomo convert-ruleset ipcidr text "$f" "${f%.list}.mrs"
           done
 
       - name: Commit & Push
