@@ -1,6 +1,3 @@
-discovery-us.conax.cloud
-dplus-northamerica-cloudfront-gcs.prod-vod.h264.io
-dplus-northamerica.media-edge.prod-vod.h264.io
 +.disco-api.com
 +.discovery.com
 +.discoveryplus.co.uk
@@ -12,3 +9,6 @@ dplus-northamerica.media-edge.prod-vod.h264.io
 +.litix.io
 +.mobile-collector.newrelic.com
 +.uplynk.com
+discovery-us.conax.cloud
+dplus-northamerica-cloudfront-gcs.prod-vod.h264.io
+dplus-northamerica.media-edge.prod-vod.h264.io

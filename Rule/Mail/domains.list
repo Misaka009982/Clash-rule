@@ -1,3 +1,6 @@
++.imap.yandex.com
++.m.hotmail.com
++.smtp.yandex.com
 apple.imap.mail.yahoo.com
 apple.smtp.mail.yahoo.com
 imap-mail.outlook.com
@@ -7,6 +10,3 @@ pop.gmail.com
 smtp-mail.outlook.com
 smtp.gmail.com
 smtp.office365.com
-+.imap.yandex.com
-+.m.hotmail.com
-+.smtp.yandex.com

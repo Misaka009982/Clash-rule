@@ -1,9 +1,3 @@
-audio4-ak-spotify-com.akamaized.net
-cdn-spotify-experiments.conductrics.com
-heads-ak-spotify-com.akamaized.net
-spotify.com.edgesuite.net
-spotify.map.fastly.net
-spotify.map.fastlylb.net
 +.audio-ak-spotify-com.akamaized.net
 +.byspotify.com
 +.heads4-ak-spotify-com.akamaized.net
@@ -24,3 +18,9 @@ spotify.map.fastlylb.net
 +.spotifynewsroom.jp
 +.spotilocal.com
 +.tospotify.com
+audio4-ak-spotify-com.akamaized.net
+cdn-spotify-experiments.conductrics.com
+heads-ak-spotify-com.akamaized.net
+spotify.com.edgesuite.net
+spotify.map.fastly.net
+spotify.map.fastlylb.net

@@ -1,9 +1,3 @@
-itvpnp.live.ott.irdeto.com
-itvpnp.stage.ott.irdeto.com
-itvpnpmobile-a.akamaihd.net
-vod-dash-ww-live.akamaized.net
-vod-thumb-ww-live.akamaized.net
-vs-cmaf-pushb-ww-live.akamaized.net
 +.bb-static.com
 +.bbc
 +.bbc-reporting-api.app
@@ -26,3 +20,9 @@ vs-cmaf-pushb-ww-live.akamaized.net
 +.itv.com
 +.itvstatic.com
 +.massive-itv.com
+itvpnp.live.ott.irdeto.com
+itvpnp.stage.ott.irdeto.com
+itvpnpmobile-a.akamaihd.net
+vod-dash-ww-live.akamaized.net
+vod-thumb-ww-live.akamaized.net
+vs-cmaf-pushb-ww-live.akamaized.net

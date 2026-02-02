@@ -1,9 +1,3 @@
-asusrouter.com
-instant.arubanetworks.com
-oasisauth.h3c.com
-router.asus.com
-setmeup.arubanetworks.com
-www.asusrouter.com
 +.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa
 +.0.in-addr.arpa
 +.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa
@@ -121,3 +115,9 @@ www.asusrouter.com
 +.ts.net
 +.wifi.cmcc
 +.zte.home
+asusrouter.com
+instant.arubanetworks.com
+oasisauth.h3c.com
+router.asus.com
+setmeup.arubanetworks.com
+www.asusrouter.com
