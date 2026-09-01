@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+
+import ipaddress
 import os
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -5,6 +8,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import yaml
 
+
+# ============================================================
+# 配置
+# ============================================================
 
 BASE_DIR = "Rule"
 OTHER_DIR = os.path.join(BASE_DIR, "Other")
@@ -27,95 +34,171 @@ CUSTOM_API = (
 MAX_WORKERS = 10
 REQUEST_TIMEOUT = 30
 
+
+# ============================================================
+# 初始化目录
+# ============================================================
+
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(OTHER_DIR, exist_ok=True)
 
 
 # ============================================================
-# 通用文件操作
+# 工具
 # ============================================================
 
 def remove_file(path):
     """
-    删除文件。
-    文件不存在时忽略。
+    安全删除文件。
     """
     try:
         if os.path.isfile(path):
             os.remove(path)
             print(f"[DELETE] {path}")
     except OSError as e:
-        print(f"[ERROR] Failed to delete {path}: {e}")
+        print(f"[WARN] Failed to delete {path}: {e}")
 
 
-def remove_rule_files(path):
+def remove_generated_files(path):
     """
-    删除某个规则对应的所有生成文件。
+    根据 .list 删除对应的：
 
-    例如：
-        domains.list
-        domains.mrs
-        domains.srs
-
-    或：
-        ipcidr.list
-        ipcidr.mrs
-        ipcidr.srs
+        .list
+        .mrs
+        .srs
     """
-    base, _ = os.path.splitext(path)
 
-    for target in (
+    base, ext = os.path.splitext(path)
+
+    targets = [
         path,
-        f"{base}.mrs",
-        f"{base}.srs",
-    ):
+        base + ".mrs",
+        base + ".srs",
+    ]
+
+    for target in targets:
         remove_file(target)
 
 
-def cleanup_empty_rule_dir(directory):
+def cleanup_empty_dir(path):
     """
-    如果规则目录已经没有任何文件，则删除目录。
+    删除空目录。
     """
-    if not os.path.isdir(directory):
+    if not os.path.isdir(path):
         return
 
     try:
-        if not os.listdir(directory):
-            os.rmdir(directory)
-            print(f"[DELETE DIR] {directory}")
+        if not os.listdir(path):
+            os.rmdir(path)
+            print(f"[DELETE DIR] {path}")
     except OSError:
         pass
 
 
 # ============================================================
-# Clash 规则解析
+# IPv4 / IPv6 清洗
 # ============================================================
 
-def parse_clash_list(text: str):
+def normalize_ipcidr(value):
     """
-    解析 Clash .list。
+    标准化 IP-CIDR / IP-CIDR6。
+
+    修复上游可能出现的：
+
+        2001:678\\:b28::118
+
+    →   2001:678:b28::118
+
+    同时将纯 IP：
+
+        1.2.3.4
+
+    转成：
+
+        1.2.3.4/32
+
+    IPv6：
+
+        2001:db8::1
+
+    转成：
+
+        2001:db8::1/128
+
+    已经带 CIDR 的保持不变。
+    """
+
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip()
+
+    if not value:
+        return None
+
+    # 修复错误转义
+    value = value.replace("\\:", ":")
+
+    # 某些来源可能带空白
+    value = value.strip()
+
+    # 解析 CIDR / IP
+    try:
+        if "/" in value:
+            network = ipaddress.ip_network(
+                value,
+                strict=False
+            )
+
+            return str(network)
+
+        ip = ipaddress.ip_address(value)
+
+        if ip.version == 4:
+            return f"{ip}/32"
+
+        return f"{ip}/128"
+
+    except ValueError:
+        print(
+            f"[INVALID IP] {value}"
+        )
+        return None
+
+
+# ============================================================
+# Clash list 解析
+# ============================================================
+
+def parse_clash_list(text):
+    """
+    解析 Clash 规则。
 
     支持：
+
         DOMAIN
         DOMAIN-SUFFIX
         IP-CIDR
         IP-CIDR6
-
-    输出：
-        domains
-        ipcidr
     """
 
     domains = set()
     ipcidr = set()
 
-    for line in text.splitlines():
-        line = line.strip()
+    for raw_line in text.splitlines():
 
-        if not line or line.startswith("#"):
+        line = raw_line.strip()
+
+        if not line:
             continue
 
-        parts = [p.strip() for p in line.split(",")]
+        if line.startswith("#"):
+            continue
+
+        parts = [
+            p.strip()
+            for p in line.split(",")
+        ]
 
         if len(parts) < 2:
             continue
@@ -126,199 +209,276 @@ def parse_clash_list(text: str):
         if not value:
             continue
 
+        # ----------------------------------------
+        # DOMAIN
+        # ----------------------------------------
+
         if rule_type == "DOMAIN":
             domains.add(value)
 
+        # ----------------------------------------
+        # DOMAIN-SUFFIX
+        # ----------------------------------------
+
         elif rule_type == "DOMAIN-SUFFIX":
-            domains.add(f"+.{value}")
+            domains.add(
+                f"+.{value}"
+            )
 
-        elif rule_type in ("IP-CIDR", "IP-CIDR6"):
-            ipcidr.add(value)
+        # ----------------------------------------
+        # IP-CIDR
+        # ----------------------------------------
 
-    return sorted(domains), sorted(ipcidr)
+        elif rule_type in (
+            "IP-CIDR",
+            "IP-CIDR6"
+        ):
+
+            normalized = normalize_ipcidr(
+                value
+            )
+
+            if normalized:
+                ipcidr.add(normalized)
+
+    return (
+        sorted(domains),
+        sorted(ipcidr)
+    )
 
 
 # ============================================================
-# 写入规则
+# 写入 list
 # ============================================================
 
 def write_list(path, items):
     """
     写入规则文件。
 
-    items 有内容：
+    有规则：
         覆盖写入
 
-    items 为空：
-        删除旧的 .list
-        同时删除对应 .mrs / .srs
+    无规则：
+        删除旧的 .list/.mrs/.srs
     """
 
     items = sorted(set(items))
 
     if items:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(items) + "\n")
+        directory = os.path.dirname(path)
 
-        print(f"[WRITE] {path}: {len(items)}")
-        return
+        if directory:
+            os.makedirs(
+                directory,
+                exist_ok=True
+            )
 
-    # 上游已经没有这类规则
-    remove_rule_files(path)
+        with open(
+            path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            f.write(
+                "\n".join(items)
+                + "\n"
+            )
+
+        print(
+            f"[WRITE] {path}: "
+            f"{len(items)}"
+        )
+
+    else:
+
+        print(
+            f"[EMPTY] {path}"
+        )
+
+        remove_generated_files(
+            path
+        )
 
 
 # ============================================================
-# 清理一个 BlackMatrix 规则
+# 清理 BlackMatrix 规则
 # ============================================================
 
 def clear_blackmatrix_rule(name):
     """
-    上游规则不存在、404 或返回空内容时，
-    删除本地旧规则。
+    删除整个：
 
-    删除：
-        Rule/<name>/domains.list
-        Rule/<name>/domains.mrs
-        Rule/<name>/domains.srs
-        Rule/<name>/ipcidr.list
-        Rule/<name>/ipcidr.mrs
-        Rule/<name>/ipcidr.srs
+        Rule/<name>/
     """
 
-    out = os.path.join(BASE_DIR, name)
-
-    remove_rule_files(
-        os.path.join(out, "domains.list")
+    out = os.path.join(
+        BASE_DIR,
+        name
     )
 
-    remove_rule_files(
-        os.path.join(out, "ipcidr.list")
+    remove_generated_files(
+        os.path.join(
+            out,
+            "domains.list"
+        )
     )
 
-    cleanup_empty_rule_dir(out)
+    remove_generated_files(
+        os.path.join(
+            out,
+            "ipcidr.list"
+        )
+    )
+
+    cleanup_empty_dir(out)
 
 
 # ============================================================
-# BlackMatrix
+# BlackMatrix 单规则
 # ============================================================
 
 def process_blackmatrix(rule):
     """
-    下载并处理单个 BlackMatrix 规则。
+    处理单个 BlackMatrix 规则。
 
-    状态处理：
+    处理策略：
 
     200 + 有规则
-        -> 更新本地文件
+        更新
 
     200 + 空规则
-        -> 删除旧规则
+        删除旧规则
 
     404
-        -> 删除旧规则
+        删除旧规则
 
-    其他 HTTP 错误
-        -> 保留旧规则
+    其他 HTTP
+        保留旧规则
 
-    网络异常 / 超时
-        -> 保留旧规则
+    网络异常
+        保留旧规则
     """
 
     name = rule.get("name")
 
     if not name:
-        return False
+        return
 
-    enc = urllib.parse.quote(name, safe="")
+    encoded_name = urllib.parse.quote(
+        name,
+        safe=""
+    )
 
     url = (
         f"{BLACKMATRIX_RAW}/"
-        f"{enc}/"
-        f"{enc}.list"
+        f"{encoded_name}/"
+        f"{encoded_name}.list"
     )
 
     try:
-        r = requests.get(
+        response = requests.get(
             url,
             timeout=REQUEST_TIMEOUT
         )
 
     except requests.RequestException as e:
+
         print(
             f"[ERROR] {name}: "
-            f"request failed: {e}"
+            f"{e}"
         )
+
         print(
-            f"[KEEP] {name}: "
-            f"keep existing files"
+            f"[KEEP] {name}"
         )
-        return False
+
+        return
 
     # --------------------------------------------------------
-    # 404：规则已经从上游删除
+    # 404
     # --------------------------------------------------------
 
-    if r.status_code == 404:
+    if response.status_code == 404:
+
         print(
-            f"[404] {name}: "
-            f"upstream rule not found"
+            f"[404] {name}"
         )
 
-        clear_blackmatrix_rule(name)
-        return True
+        clear_blackmatrix_rule(
+            name
+        )
+
+        return
 
     # --------------------------------------------------------
-    # 非 200：可能是临时故障
-    # 不删除本地旧规则
+    # 其他 HTTP 错误
     # --------------------------------------------------------
 
-    if r.status_code != 200:
+    if response.status_code != 200:
+
         print(
-            f"[ERROR] {name}: "
-            f"HTTP {r.status_code}"
+            f"[HTTP {response.status_code}] "
+            f"{name}"
         )
+
         print(
-            f"[KEEP] {name}: "
-            f"keep existing files"
+            f"[KEEP] {name}"
         )
-        return False
+
+        return
 
     # --------------------------------------------------------
-    # 正常解析
+    # 解析
     # --------------------------------------------------------
 
-    domains, ipcidr = parse_clash_list(r.text)
-
-    out = os.path.join(BASE_DIR, name)
+    domains, ipcidr = parse_clash_list(
+        response.text
+    )
 
     # --------------------------------------------------------
-    # 上游成功返回，但是整个文件为空
+    # 上游为空
     # --------------------------------------------------------
 
     if not domains and not ipcidr:
+
         print(
             f"[EMPTY] {name}: "
             f"upstream returned no rules"
         )
 
-        clear_blackmatrix_rule(name)
-        return True
+        clear_blackmatrix_rule(
+            name
+        )
+
+        return
 
     # --------------------------------------------------------
     # 正常写入
     # --------------------------------------------------------
 
-    os.makedirs(out, exist_ok=True)
+    out = os.path.join(
+        BASE_DIR,
+        name
+    )
+
+    os.makedirs(
+        out,
+        exist_ok=True
+    )
 
     write_list(
-        os.path.join(out, "domains.list"),
+        os.path.join(
+            out,
+            "domains.list"
+        ),
         domains
     )
 
     write_list(
-        os.path.join(out, "ipcidr.list"),
+        os.path.join(
+            out,
+            "ipcidr.list"
+        ),
         ipcidr
     )
 
@@ -328,124 +488,140 @@ def process_blackmatrix(rule):
         f"{len(ipcidr)} ip"
     )
 
-    return True
-
 
 # ============================================================
-# 获取 BlackMatrix 规则列表
+# 获取 BlackMatrix 当前规则
 # ============================================================
 
 def get_blackmatrix_rules():
     """
-    获取 BlackMatrix 当前所有规则目录。
-
-    返回：
-        list
+    获取 BlackMatrix 当前规则目录。
     """
 
     try:
-        r = requests.get(
+        response = requests.get(
             BLACKMATRIX_API,
             timeout=REQUEST_TIMEOUT
         )
 
     except requests.RequestException as e:
+
         print(
-            f"[ERROR] Failed to fetch "
-            f"BlackMatrix rule list: {e}"
+            f"[ERROR] BlackMatrix API: "
+            f"{e}"
         )
+
         return None
 
-    if r.status_code != 200:
+    if response.status_code != 200:
+
         print(
             f"[ERROR] BlackMatrix API "
-            f"HTTP {r.status_code}"
+            f"HTTP {response.status_code}"
         )
+
         return None
 
     try:
-        data = r.json()
+        data = response.json()
+
     except ValueError as e:
+
         print(
-            f"[ERROR] Invalid BlackMatrix API "
-            f"response: {e}"
+            f"[ERROR] Invalid BlackMatrix "
+            f"JSON: {e}"
         )
+
         return None
 
     if not isinstance(data, list):
+
         print(
             "[ERROR] BlackMatrix API "
-            "response is not a list"
+            "did not return a list"
         )
+
         return None
 
-    return [
+    rules = [
         item
         for item in data
-        if item.get("type") == "dir"
-        and item.get("name")
+        if (
+            item.get("type") == "dir"
+            and item.get("name")
+        )
     ]
 
+    return rules
+
 
 # ============================================================
-# BlackMatrix 旧规则清理
+# 清理 BlackMatrix 已删除规则
 # ============================================================
 
-def cleanup_stale_blackmatrix_rules(current_rules):
+def cleanup_stale_blackmatrix_rules(
+    rules
+):
     """
-    如果 BlackMatrix 某个规则目录已经被删除，
-    但本地仓库还留着，则删除本地旧规则。
+    如果上游已经删除了整个规则目录，
+    本地也删除。
 
-    注意：
-        只有成功拿到完整上游规则列表时才执行。
-        如果 API 本身失败，则绝不会执行这里，
-        防止网络异常造成整库被清空。
+    只有 API 成功时才执行。
     """
 
     current_names = {
-        rule["name"]
-        for rule in current_rules
-        if rule.get("name")
+        item["name"]
+        for item in rules
+        if item.get("name")
     }
 
-    if not os.path.isdir(BASE_DIR):
-        return
-
     for name in os.listdir(BASE_DIR):
+
         if name == "Other":
             continue
 
-        path = os.path.join(BASE_DIR, name)
+        path = os.path.join(
+            BASE_DIR,
+            name
+        )
 
         if not os.path.isdir(path):
             continue
 
         if name not in current_names:
+
             print(
-                f"[STALE] BlackMatrix rule removed upstream: "
+                f"[STALE] Removed upstream: "
                 f"{name}"
             )
 
-            clear_blackmatrix_rule(name)
+            clear_blackmatrix_rule(
+                name
+            )
 
 
 # ============================================================
-# Custom Rules
+# Custom
 # ============================================================
 
 def clear_custom_rule(name):
     """
-    删除 Rule/Other 下对应规则的全部生成文件。
+    删除：
+
+        Rule/Other/<name>-domains.list
+        Rule/Other/<name>-ipcidr.list
+
+    以及对应 MRS / SRS。
     """
 
-    remove_rule_files(
+    remove_generated_files(
         os.path.join(
             OTHER_DIR,
             f"{name}-domains.list"
         )
     )
 
-    remove_rule_files(
+    remove_generated_files(
         os.path.join(
             OTHER_DIR,
             f"{name}-ipcidr.list"
@@ -453,57 +629,69 @@ def clear_custom_rule(name):
     )
 
 
+# ============================================================
+# Custom YAML 解析
+# ============================================================
+
 def process_custom():
     """
-    获取自定义规则仓库：
+    读取自定义规则仓库：
 
         Misaka09982/Clash/Rules
 
-    规则格式：
-
-        payload:
-          - DOMAIN,example.com
-          - DOMAIN-SUFFIX,google.com
-          - IP-CIDR,1.1.1.0/24
+    处理 YAML 中的 payload。
     """
 
     try:
-        r = requests.get(
+        response = requests.get(
             CUSTOM_API,
             timeout=REQUEST_TIMEOUT
         )
 
     except requests.RequestException as e:
-        print(
-            f"[ERROR] Failed to fetch custom "
-            f"rule list: {e}"
-        )
-        return False
 
-    if r.status_code != 200:
         print(
-            f"[ERROR] Custom API "
-            f"HTTP {r.status_code}"
+            f"[ERROR] Custom API: "
+            f"{e}"
         )
+
         print(
             "[KEEP] Existing custom rules"
         )
+
+        return False
+
+    if response.status_code != 200:
+
+        print(
+            f"[ERROR] Custom API "
+            f"HTTP {response.status_code}"
+        )
+
+        print(
+            "[KEEP] Existing custom rules"
+        )
+
         return False
 
     try:
-        files = r.json()
-    except ValueError as e:
+        files = response.json()
+
+    except ValueError:
+
         print(
-            f"[ERROR] Invalid custom API "
-            f"response: {e}"
+            "[ERROR] Invalid custom API JSON"
         )
+
         return False
 
     if not isinstance(files, list):
+
         print(
-            "[ERROR] Custom API "
-            "response is not a list"
+            "[ERROR] Custom API response "
+            "is not a list"
         )
+
         return False
 
     current_names = set()
@@ -513,84 +701,136 @@ def process_custom():
         if item.get("type") != "file":
             continue
 
-        filename = item.get("name", "")
+        filename = item.get(
+            "name",
+            ""
+        )
 
-        if not filename.endswith(".yaml"):
+        if not filename.endswith(
+            ".yaml"
+        ):
             continue
 
-        download_url = item.get("download_url")
+        name = filename.rsplit(
+            ".",
+            1
+        )[0]
+
+        current_names.add(name)
+
+        download_url = item.get(
+            "download_url"
+        )
 
         if not download_url:
             continue
 
-        name = filename.rsplit(".", 1)[0]
-
-        current_names.add(name)
+        # ----------------------------------------------------
+        # 下载 YAML
+        # ----------------------------------------------------
 
         try:
-            rr = requests.get(
+            response_yaml = requests.get(
                 download_url,
                 timeout=REQUEST_TIMEOUT
             )
 
         except requests.RequestException as e:
+
             print(
                 f"[ERROR] Other/{name}: "
-                f"request failed: {e}"
+                f"{e}"
             )
+
             print(
-                f"[KEEP] Other/{name}: "
-                f"keep existing files"
+                f"[KEEP] Other/{name}"
             )
+
             continue
 
-        if rr.status_code == 404:
+        # ----------------------------------------------------
+        # 404
+        # ----------------------------------------------------
+
+        if response_yaml.status_code == 404:
+
             print(
                 f"[404] Other/{name}"
             )
-            clear_custom_rule(name)
+
+            clear_custom_rule(
+                name
+            )
+
             continue
 
-        if rr.status_code != 200:
+        # ----------------------------------------------------
+        # HTTP error
+        # ----------------------------------------------------
+
+        if response_yaml.status_code != 200:
+
             print(
-                f"[ERROR] Other/{name}: "
-                f"HTTP {rr.status_code}"
+                f"[HTTP "
+                f"{response_yaml.status_code}] "
+                f"Other/{name}"
             )
+
             print(
-                f"[KEEP] Other/{name}: "
-                f"keep existing files"
+                f"[KEEP] Other/{name}"
             )
+
             continue
 
-        # --------------------------------------------
+        # ----------------------------------------------------
         # YAML
-        # --------------------------------------------
+        # ----------------------------------------------------
 
         try:
-            data = yaml.safe_load(rr.text) or {}
+            data = (
+                yaml.safe_load(
+                    response_yaml.text
+                )
+                or {}
+            )
 
         except yaml.YAMLError as e:
+
             print(
                 f"[ERROR] Other/{name}: "
                 f"invalid YAML: {e}"
             )
+
             print(
-                f"[KEEP] Other/{name}: "
-                f"keep existing files"
+                f"[KEEP] Other/{name}"
             )
+
             continue
 
         domains = set()
         ipcidr = set()
 
-        payload = data.get("payload", [])
+        payload = data.get(
+            "payload",
+            []
+        )
 
-        if not isinstance(payload, list):
+        if not isinstance(
+            payload,
+            list
+        ):
             payload = []
+
+        # ----------------------------------------------------
+        # 解析 payload
+        # ----------------------------------------------------
 
         for rule in payload:
 
-            if not isinstance(rule, str):
+            if not isinstance(
+                rule,
+                str
+            ):
                 continue
 
             parts = [
@@ -607,34 +847,56 @@ def process_custom():
             if not value:
                 continue
 
+            # DOMAIN
             if rule_type == "DOMAIN":
-                domains.add(value)
 
+                domains.add(
+                    value
+                )
+
+            # DOMAIN-SUFFIX
             elif rule_type == "DOMAIN-SUFFIX":
-                domains.add(f"+.{value}")
 
+                domains.add(
+                    f"+.{value}"
+                )
+
+            # IP
             elif rule_type in (
                 "IP-CIDR",
                 "IP-CIDR6"
             ):
-                ipcidr.add(value)
 
-        # --------------------------------------------
-        # 上游 YAML 正常，但没有规则
-        # --------------------------------------------
+                normalized = (
+                    normalize_ipcidr(
+                        value
+                    )
+                )
+
+                if normalized:
+                    ipcidr.add(
+                        normalized
+                    )
+
+        # ----------------------------------------------------
+        # 空规则
+        # ----------------------------------------------------
 
         if not domains and not ipcidr:
+
             print(
-                f"[EMPTY] Other/{name}: "
-                f"upstream returned no rules"
+                f"[EMPTY] Other/{name}"
             )
 
-            clear_custom_rule(name)
+            clear_custom_rule(
+                name
+            )
+
             continue
 
-        # --------------------------------------------
-        # 正常写入
-        # --------------------------------------------
+        # ----------------------------------------------------
+        # 写入
+        # ----------------------------------------------------
 
         write_list(
             os.path.join(
@@ -659,7 +921,7 @@ def process_custom():
         )
 
     # --------------------------------------------------------
-    # 清理上游已经删除的自定义 YAML
+    # 清理上游删除的 YAML
     # --------------------------------------------------------
 
     cleanup_stale_custom_rules(
@@ -670,117 +932,139 @@ def process_custom():
 
 
 # ============================================================
-# Custom 旧规则清理
+# 清理已经不存在的 Custom 规则
 # ============================================================
 
-def cleanup_stale_custom_rules(current_names):
+def cleanup_stale_custom_rules(
+    current_names
+):
     """
-    如果自定义仓库中 YAML 已经被删除，
-    则删除 Rule/Other 中对应旧规则。
-
-    只有在 API 请求成功后才调用。
+    如果 Custom 仓库中的 YAML 已经删除，
+    本地也删除。
     """
 
-    if not os.path.isdir(OTHER_DIR):
+    if not os.path.isdir(
+        OTHER_DIR
+    ):
         return
 
     existing_names = set()
 
-    for filename in os.listdir(OTHER_DIR):
+    for filename in os.listdir(
+        OTHER_DIR
+    ):
 
         if filename.endswith(
             "-domains.list"
         ):
+
             existing_names.add(
-                filename[:-len("-domains.list")]
+                filename[
+                    :-len("-domains.list")
+                ]
             )
 
         elif filename.endswith(
             "-ipcidr.list"
         ):
+
             existing_names.add(
-                filename[:-len("-ipcidr.list")]
+                filename[
+                    :-len("-ipcidr.list")
+                ]
             )
 
-    stale_names = (
-        existing_names - current_names
+    stale = (
+        existing_names
+        - current_names
     )
 
-    for name in sorted(stale_names):
+    for name in sorted(stale):
+
         print(
-            f"[STALE] Custom rule removed upstream: "
+            f"[STALE] Custom removed: "
             f"{name}"
         )
 
-        clear_custom_rule(name)
+        clear_custom_rule(
+            name
+        )
 
 
 # ============================================================
-# 主程序
+# Main
 # ============================================================
 
 def main():
 
-    print("========================================")
-    print("Clash-rule generator")
-    print("========================================")
+    print(
+        "========================================"
+    )
+
+    print(
+        "Clash-rule generator"
+    )
+
+    print(
+        "========================================"
+    )
 
     # ========================================================
     # BlackMatrix
     # ========================================================
 
     print("")
-    print("=== Fetch BlackMatrix rules ===")
+    print(
+        "=== BlackMatrix ==="
+    )
 
     rules = get_blackmatrix_rules()
 
     if rules is None:
-        print(
-            "[ERROR] BlackMatrix rule list "
-            "could not be fetched."
-        )
 
         print(
-            "[KEEP] Existing BlackMatrix "
-            "rules will NOT be removed."
+            "[KEEP] BlackMatrix rules"
         )
-
-        blackmatrix_ok = False
 
     else:
-        blackmatrix_ok = True
 
         print(
-            f"[INFO] Found {len(rules)} "
-            f"BlackMatrix rules"
+            f"[INFO] Found "
+            f"{len(rules)} rules"
         )
 
         # ----------------------------------------------------
-        # 并发处理
+        # 并发下载
         # ----------------------------------------------------
 
         with ThreadPoolExecutor(
             max_workers=MAX_WORKERS
-        ) as pool:
+        ) as executor:
 
             futures = [
-                pool.submit(
+                executor.submit(
                     process_blackmatrix,
                     rule
                 )
                 for rule in rules
             ]
 
-            for future in as_completed(futures):
+            for future in as_completed(
+                futures
+            ):
+
                 try:
                     future.result()
+
                 except Exception as e:
+
                     print(
-                        f"[ERROR] Worker exception: {e}"
+                        f"[ERROR] Worker: "
+                        f"{e}"
                     )
 
         # ----------------------------------------------------
-        # 清理已经从上游删除的目录
+        # 清理已经被删除的规则
         # ----------------------------------------------------
 
         cleanup_stale_blackmatrix_rules(
@@ -792,18 +1076,28 @@ def main():
     # ========================================================
 
     print("")
-    print("=== Fetch Custom rules ===")
+    print(
+        "=== Custom Rules ==="
+    )
 
     process_custom()
 
     # ========================================================
-    # 完成
+    # Done
     # ========================================================
 
     print("")
-    print("========================================")
-    print("All rules done.")
-    print("========================================")
+    print(
+        "========================================"
+    )
+
+    print(
+        "All rules done."
+    )
+
+    print(
+        "========================================"
+    )
 
 
 if __name__ == "__main__":
