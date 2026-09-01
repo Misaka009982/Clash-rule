@@ -9,39 +9,55 @@ on:
 permissions:
   contents: write
 
+
 jobs:
+
   build:
+
     runs-on: ubuntu-latest
 
     steps:
+
       # ======================================================
       # Checkout
       # ======================================================
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
           fetch-depth: 0
+          persist-credentials: true
+
 
       # ======================================================
       # Python
       # ======================================================
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+
       # ======================================================
       # Python dependencies
       # ======================================================
-      - name: Install dependencies
+
+      - name: Install Python dependencies
         run: |
+          set -e
+
           python -m pip install --upgrade pip
-          pip install requests pyyaml
+
+          pip install \
+            requests \
+            pyyaml
+
 
       # ======================================================
       # Generate .list
       # ======================================================
+
       - name: Generate rules
         run: |
           set -e
@@ -52,23 +68,11 @@ jobs:
 
           python .github/scripts/rules.py
 
+
       # ======================================================
       # Install Mihomo
-      #
-      # 注意：
-      # 绝对不能执行：
-      #
-      #   mihomo
-      #   mihomo version
-      #
-      # 否则 Mihomo 会进入核心运行模式。
-      #
-      # 这里仅下载二进制并使用：
-      #
-      #   mihomo -v
-      #
-      # 检查版本。
       # ======================================================
+
       - name: Install Mihomo
         run: |
           set -e
@@ -99,12 +103,12 @@ jobs:
             exit 1
           fi
 
-          echo "Download:"
+          echo "Mihomo:"
           echo "$ASSET_URL"
 
           rm -f \
-            /tmp/mihomo.gz \
-            /tmp/mihomo
+            /tmp/mihomo \
+            /tmp/mihomo.gz
 
           curl \
             -fL \
@@ -123,44 +127,203 @@ jobs:
           echo
           echo "===== Mihomo version ====="
 
+          # 这里只检查版本
+          # 不执行 mihomo version
+          # 不执行 mihomo
           mihomo -v
+
 
       # ======================================================
       # Verify Mihomo convert-ruleset
-      #
-      # 使用最小规则测试，防止下载到错误文件。
       # ======================================================
+
       - name: Verify Mihomo
         run: |
           set -e
 
           echo "========================================"
-          echo "Verify Mihomo convert-ruleset"
+          echo "Verify Mihomo"
           echo "========================================"
 
           rm -f \
-            /tmp/test.txt \
-            /tmp/test.mrs
+            /tmp/test-mihomo.txt \
+            /tmp/test-mihomo.mrs
 
-          printf '%s\n' "example.com" > /tmp/test.txt
+          printf '%s\n' \
+            "example.com" \
+            > /tmp/test-mihomo.txt
 
           mihomo \
             convert-ruleset \
             domain \
             text \
-            /tmp/test.txt \
-            /tmp/test.mrs
+            /tmp/test-mihomo.txt \
+            /tmp/test-mihomo.mrs
 
-          test -s /tmp/test.mrs
+          test -s /tmp/test-mihomo.mrs
 
           echo
           echo "Mihomo convert-ruleset OK"
 
-          ls -lh /tmp/test.mrs
+          ls -lh \
+            /tmp/test-mihomo.mrs
+
+
+      # ======================================================
+      # 再次清洗 IP-CIDR
+      #
+      # 防止历史 .list 中还存在：
+      #
+      #   2001:678\:b28::118
+      #
+      # 或：
+      #
+      #   2001:db8::1
+      #
+      # 变成：
+      #
+      #   2001:678:b28::118/128
+      #   2001:db8::1/128
+      #
+      # 这里不直接依赖 sed，而是复用 rules.py。
+      # ======================================================
+
+      - name: Normalize existing IP rules
+        run: |
+          set -e
+
+          python - <<'PY'
+          import ipaddress
+          from pathlib import Path
+
+          base = Path("Rule")
+
+          def normalize(value):
+              value = value.strip()
+              value = value.replace("\\:", ":")
+
+              if not value:
+                  return None
+
+              try:
+                  if "/" in value:
+                      return str(
+                          ipaddress.ip_network(
+                              value,
+                              strict=False
+                          )
+                      )
+
+                  ip = ipaddress.ip_address(value)
+
+                  if ip.version == 4:
+                      return f"{ip}/32"
+
+                  return f"{ip}/128"
+
+              except ValueError:
+                  print(
+                      f"[INVALID] {value}"
+                  )
+                  return None
+
+          for path in base.rglob("*-ipcidr.list"):
+
+              lines = []
+
+              for line in path.read_text(
+                  encoding="utf-8",
+                  errors="ignore"
+              ).splitlines():
+
+                  line = line.strip()
+
+                  if not line:
+                      continue
+
+                  normalized = normalize(
+                      line
+                  )
+
+                  if normalized:
+                      lines.append(
+                          normalized
+                      )
+
+              lines = sorted(
+                  set(lines)
+              )
+
+              if lines:
+                  path.write_text(
+                      "\n".join(lines) + "\n",
+                      encoding="utf-8"
+                  )
+
+                  print(
+                      f"[NORMALIZED] "
+                      f"{path}: "
+                      f"{len(lines)}"
+                  )
+
+              else:
+                  print(
+                      f"[EMPTY] {path}"
+                  )
+                  path.unlink(
+                      missing_ok=True
+                  )
+
+          for path in base.rglob("ipcidr.list"):
+
+              lines = []
+
+              for line in path.read_text(
+                  encoding="utf-8",
+                  errors="ignore"
+              ).splitlines():
+
+                  line = line.strip()
+
+                  if not line:
+                      continue
+
+                  normalized = normalize(
+                      line
+                  )
+
+                  if normalized:
+                      lines.append(
+                          normalized
+                      )
+
+              lines = sorted(
+                  set(lines)
+              )
+
+              if lines:
+                  path.write_text(
+                      "\n".join(lines) + "\n",
+                      encoding="utf-8"
+                  )
+
+                  print(
+                      f"[NORMALIZED] "
+                      f"{path}: "
+                      f"{len(lines)}"
+                  )
+
+              else:
+                  path.unlink(
+                      missing_ok=True
+                  )
+          PY
+
 
       # ======================================================
       # Convert .list -> .mrs
       # ======================================================
+
       - name: Convert rules to MRS
         run: |
           set -e
@@ -170,57 +333,100 @@ jobs:
           echo "========================================"
 
           convert() {
+
             local type="$1"
             local src="$2"
             local dst="$3"
 
-            if [ -f "$src" ]; then
-              if grep -q '[^[:space:]]' "$src"; then
+            # ----------------------------------------------
+            # 文件不存在
+            # ----------------------------------------------
 
-                echo
-                echo "[MRS]"
-                echo "  Type: $type"
-                echo "  Src : $src"
-                echo "  Dst : $dst"
-
-                mihomo \
-                  convert-ruleset \
-                  "$type" \
-                  text \
-                  "$src" \
-                  "$dst"
-
-                if [ ! -s "$dst" ]; then
-                  echo "ERROR: MRS file is empty: $dst"
-                  exit 1
-                fi
-
-              else
-
-                echo "[EMPTY] $src"
-
-                # 上游为空时删除旧 MRS
-                rm -f "$dst"
-              fi
-
-            else
+            if [ ! -f "$src" ]; then
 
               echo "[MISSING] $src"
 
-              # list 已经不存在时删除旧 MRS
               rm -f "$dst"
+
+              return 0
+
             fi
+
+            # ----------------------------------------------
+            # 空文件
+            # ----------------------------------------------
+
+            if ! grep -q '[^[:space:]]' "$src"; then
+
+              echo "[EMPTY] $src"
+
+              rm -f "$dst"
+
+              return 0
+
+            fi
+
+            # ----------------------------------------------
+            # 转换
+            # ----------------------------------------------
+
+            echo
+            echo "[MRS]"
+            echo "  Type: $type"
+            echo "  Src : $src"
+            echo "  Dst : $dst"
+
+            # 注意：
+            # 不要执行 mihomo 本身。
+            # 只执行 convert-ruleset。
+
+            if ! mihomo \
+              convert-ruleset \
+              "$type" \
+              text \
+              "$src" \
+              "$dst"
+            then
+
+              echo
+              echo "ERROR: Mihomo conversion failed"
+              echo "Source: $src"
+
+              rm -f "$dst"
+
+              exit 1
+
+            fi
+
+            # ----------------------------------------------
+            # 检查输出
+            # ----------------------------------------------
+
+            if [ ! -s "$dst" ]; then
+
+              echo
+              echo "ERROR: Empty MRS output:"
+              echo "$dst"
+
+              rm -f "$dst"
+
+              exit 1
+
+            fi
+
+            echo "[OK] $dst"
+
           }
 
+
           # ==================================================
-          # Rule/<name>/
+          # Rule/<name>
           # ==================================================
 
           for d in Rule/*; do
 
             [ -d "$d" ] || continue
 
-            # Rule/Other 使用另外的文件结构
             if [ "$(basename "$d")" = "Other" ]; then
               continue
             fi
@@ -237,16 +443,12 @@ jobs:
 
           done
 
+
           # ==================================================
-          # Rule/Other/
+          # Rule/Other
           # ==================================================
 
           if [ -d "Rule/Other" ]; then
-
-            echo
-            echo "========================================"
-            echo "Convert Rule/Other domains"
-            echo "========================================"
 
             for f in Rule/Other/*-domains.list; do
 
@@ -259,10 +461,6 @@ jobs:
 
             done
 
-            echo
-            echo "========================================"
-            echo "Convert Rule/Other ipcidr"
-            echo "========================================"
 
             for f in Rule/Other/*-ipcidr.list; do
 
@@ -277,12 +475,11 @@ jobs:
 
           fi
 
+
       # ======================================================
       # Install sing-box
-      #
-      # 自动获取最新稳定版。
-      # 不使用 alpha / beta / rc。
       # ======================================================
+
       - name: Install sing-box
         run: |
           set -e
@@ -304,7 +501,7 @@ jobs:
           )
 
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-            echo "ERROR: Failed to determine sing-box version"
+            echo "ERROR: Unable to determine sing-box version"
             exit 1
           fi
 
@@ -312,15 +509,18 @@ jobs:
 
           echo "sing-box version: $VERSION"
 
-          ASSET_NAME="sing-box-${VERSION_NO_V}-linux-amd64.tar.gz"
+          ARCHIVE="sing-box-${VERSION_NO_V}-linux-amd64.tar.gz"
 
-          DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/${ASSET_NAME}"
+          DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/${ARCHIVE}"
 
           echo "Download:"
           echo "$DOWNLOAD_URL"
 
-          rm -rf /tmp/sing-box
-          mkdir -p /tmp/sing-box
+          rm -rf \
+            /tmp/sing-box
+
+          mkdir -p \
+            /tmp/sing-box
 
           curl \
             -fL \
@@ -335,7 +535,8 @@ jobs:
             -C /tmp/sing-box \
             --strip-components=1
 
-          test -f /tmp/sing-box/sing-box
+          test -f \
+            /tmp/sing-box/sing-box
 
           install \
             -m 0755 \
@@ -347,20 +548,18 @@ jobs:
 
           sing-box version
 
+
       # ======================================================
-      # Verify sing-box rule-set compile
+      # Verify sing-box
       # ======================================================
+
       - name: Verify sing-box
         run: |
           set -e
 
           echo "========================================"
-          echo "Verify sing-box rule-set compile"
+          echo "Verify sing-box"
           echo "========================================"
-
-          rm -f \
-            /tmp/test-srs.json \
-            /tmp/test.srs
 
           cat > /tmp/test-srs.json <<'JSON'
           {
@@ -369,11 +568,21 @@ jobs:
               {
                 "domain": [
                   "example.com"
+                ],
+                "domain_suffix": [
+                  "google.com"
+                ],
+                "ip_cidr": [
+                  "1.2.3.4/32",
+                  "2001:db8::1/128"
                 ]
               }
             ]
           }
           JSON
+
+          rm -f \
+            /tmp/test.srs
 
           sing-box \
             rule-set \
@@ -382,30 +591,20 @@ jobs:
             /tmp/test.srs \
             /tmp/test-srs.json
 
-          test -s /tmp/test.srs
+          test -s \
+            /tmp/test.srs
 
           echo
           echo "sing-box rule-set compile OK"
 
-          ls -lh /tmp/test.srs
+          ls -lh \
+            /tmp/test.srs
+
 
       # ======================================================
       # Generate SRS
-      #
-      # 使用 .list 直接生成临时 JSON：
-      #
-      # domains.list
-      #      ↓
-      # domain / domain_suffix
-      #      ↓
-      # 临时 JSON
-      #      ↓
-      # sing-box
-      #      ↓
-      # domains.srs
-      #
-      # JSON 不进入 Git。
       # ======================================================
+
       - name: Convert rules to SRS
         run: |
           set -e
@@ -414,16 +613,52 @@ jobs:
           echo "Convert rules to SRS"
           echo "========================================"
 
-          python .github/scripts/srs.py
+          python \
+            .github/scripts/srs.py
+
 
       # ======================================================
-      # 最终检查
+      # Remove orphan MRS
+      #
+      # 如果 list 已经不存在，
+      # 对应 mrs 也删除。
       # ======================================================
-      - name: Verify generated files
+
+      - name: Cleanup orphan MRS
         run: |
           set -e
 
-          echo
+          echo "========================================"
+          echo "Cleanup orphan MRS"
+          echo "========================================"
+
+          find Rule \
+            -type f \
+            -name "*.mrs" \
+            -print0 |
+          while IFS= read -r -d '' mrs; do
+
+            list="${mrs%.mrs}.list"
+
+            if [ ! -f "$list" ]; then
+
+              echo "[DELETE] $mrs"
+
+              rm -f "$mrs"
+
+            fi
+
+          done
+
+
+      # ======================================================
+      # Show generated files
+      # ======================================================
+
+      - name: Show generated files
+        run: |
+          set -e
+
           echo "========================================"
           echo "Generated files"
           echo "========================================"
@@ -434,8 +669,9 @@ jobs:
           find Rule \
             -type f \
             -name "*.list" \
-            -print \
-            | sort
+            -print |
+          sort
+
 
           echo
           echo "===== MRS ====="
@@ -443,8 +679,9 @@ jobs:
           find Rule \
             -type f \
             -name "*.mrs" \
-            -print \
-            | sort
+            -print |
+          sort
+
 
           echo
           echo "===== SRS ====="
@@ -452,44 +689,49 @@ jobs:
           find Rule \
             -type f \
             -name "*.srs" \
-            -print \
-            | sort
+            -print |
+          sort
+
 
           echo
-          echo "===== File count ====="
+          echo "===== COUNT ====="
 
-          echo "LIST:"
+          echo -n "LIST: "
           find Rule \
             -type f \
-            -name "*.list" \
-            | wc -l
+            -name "*.list" |
+          wc -l
 
-          echo "MRS:"
+          echo -n "MRS : "
           find Rule \
             -type f \
-            -name "*.mrs" \
-            | wc -l
+            -name "*.mrs" |
+          wc -l
 
-          echo "SRS:"
+          echo -n "SRS : "
           find Rule \
             -type f \
-            -name "*.srs" \
-            | wc -l
+            -name "*.srs" |
+          wc -l
+
 
       # ======================================================
       # Git status
       # ======================================================
-      - name: Show Git changes
+
+      - name: Git status
         run: |
           echo "========================================"
-          echo "Git changes"
+          echo "Git status"
           echo "========================================"
 
           git status --short
 
+
       # ======================================================
       # Commit & Push
       # ======================================================
+
       - name: Commit & Push
         run: |
           set -e
@@ -506,15 +748,21 @@ jobs:
             user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
+          # -A 非常重要：
+          # 可以把删除的 .list/.mrs/.srs 一起提交。
+
           git add -A Rule
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+
+            echo "No changes."
+
             exit 0
+
           fi
 
           echo
-          echo "===== Staged changes ====="
+          echo "===== Changes ====="
 
           git diff \
             --cached \
@@ -524,4 +772,3 @@ jobs:
             -m "Update rules"
 
           git push
-
