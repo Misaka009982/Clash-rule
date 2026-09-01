@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import ipaddress
 import json
 import shutil
 import subprocess
@@ -14,14 +15,11 @@ from pathlib import Path
 
 BASE_DIR = Path("Rule")
 
-# sing-box Rule Set Source Format
+# sing-box Source Format
 #
 # version 2:
-#   兼容 sing-box 1.10+
-#   对 domain_suffix 的二进制规则集有优化
-#
-# 如果你的 sing-box 全部 >= 1.14，
-# 可以自行改成 5。
+#   兼容较新的 sing-box
+#   对 domain_suffix 有优化
 SING_BOX_RULESET_VERSION = 2
 
 
@@ -29,7 +27,7 @@ SING_BOX_RULESET_VERSION = 2
 # 日志
 # ============================================================
 
-def log(message: str = "") -> None:
+def log(message=""):
     print(message, flush=True)
 
 
@@ -37,40 +35,48 @@ def log(message: str = "") -> None:
 # 文件工具
 # ============================================================
 
-def safe_remove(path: Path) -> None:
+def safe_remove(path):
     """
     删除文件。
-    不存在时忽略。
     """
     try:
         if path.is_file() or path.is_symlink():
             path.unlink()
-            log(f"[DELETE] {path}")
+            log(
+                f"[DELETE] {path}"
+            )
     except OSError as e:
-        log(f"[WARN] Failed to delete {path}: {e}")
+        log(
+            f"[WARN] Failed to delete "
+            f"{path}: {e}"
+        )
 
 
-def read_rule_file(path: Path) -> list[str]:
+def read_list(path):
     """
-    读取 .list 文件。
+    读取 .list。
 
     自动：
-    - 去除前后空格
+    - UTF-8
+    - 去除空白
     - 跳过空行
-    - 跳过 # 注释
+    - 跳过 #
     - 去重
     """
+
     if not path.is_file():
         return []
 
-    rules = set()
+    result = set()
 
     try:
         with path.open(
             "r",
             encoding="utf-8"
         ) as f:
+
             for raw in f:
+
                 line = raw.strip()
 
                 if not line:
@@ -79,18 +85,13 @@ def read_rule_file(path: Path) -> list[str]:
                 if line.startswith("#"):
                     continue
 
-                rules.add(line)
-
-    except OSError as e:
-        log(
-            f"[ERROR] Failed to read "
-            f"{path}: {e}"
-        )
+                result.add(line)
 
     except UnicodeDecodeError:
+
         log(
-            f"[WARN] Invalid UTF-8 in "
-            f"{path}, retrying with errors=ignore"
+            f"[WARN] Invalid UTF-8: "
+            f"{path}"
         )
 
         try:
@@ -99,7 +100,9 @@ def read_rule_file(path: Path) -> list[str]:
                 encoding="utf-8",
                 errors="ignore"
             ) as f:
+
                 for raw in f:
+
                     line = raw.strip()
 
                     if not line:
@@ -108,29 +111,119 @@ def read_rule_file(path: Path) -> list[str]:
                     if line.startswith("#"):
                         continue
 
-                    rules.add(line)
+                    result.add(line)
 
         except OSError as e:
+
             log(
-                f"[ERROR] Failed to read "
+                f"[ERROR] Read failed "
                 f"{path}: {e}"
             )
 
-    return sorted(rules)
+    except OSError as e:
+
+        log(
+            f"[ERROR] Read failed "
+            f"{path}: {e}"
+        )
+
+    return sorted(result)
 
 
 # ============================================================
-# DOMAIN 转换
+# IPv4 / IPv6
 # ============================================================
 
-def convert_domains(items: list[str]) -> dict:
+def normalize_ipcidr(value):
+    """
+    修复并规范化 IP。
+
+    支持：
+
+        1.2.3.4
+        1.2.3.4/32
+
+        2001:db8::1
+        2001:db8::1/128
+
+    同时修复：
+
+        2001:678\\:b28::118
+
+    """
+
+    if not isinstance(
+        value,
+        str
+    ):
+        return None
+
+    value = value.strip()
+
+    if not value:
+        return None
+
+    # --------------------------------------------------------
+    # 修复错误转义
+    # --------------------------------------------------------
+
+    value = value.replace(
+        "\\:",
+        ":"
+    )
+
+    value = value.strip()
+
+    # --------------------------------------------------------
+    # CIDR
+    # --------------------------------------------------------
+
+    try:
+
+        if "/" in value:
+
+            network = ipaddress.ip_network(
+                value,
+                strict=False
+            )
+
+            return str(network)
+
+        # ----------------------------------------------------
+        # 单独 IP
+        # ----------------------------------------------------
+
+        ip = ipaddress.ip_address(
+            value
+        )
+
+        if ip.version == 4:
+            return f"{ip}/32"
+
+        return f"{ip}/128"
+
+    except ValueError:
+
+        log(
+            f"[INVALID IP] "
+            f"{value}"
+        )
+
+        return None
+
+
+# ============================================================
+# Domain
+# ============================================================
+
+def build_domain_rule(items):
     """
     Clash 风格：
 
         example.com
         +.google.com
 
-    转成 sing-box：
+    →
 
         domain
         domain_suffix
@@ -140,27 +233,35 @@ def convert_domains(items: list[str]) -> dict:
     domain_suffix = set()
 
     for item in items:
+
         item = item.strip()
 
         if not item:
             continue
 
-        # Clash DOMAIN-SUFFIX
+        # DOMAIN-SUFFIX
         if item.startswith("+."):
+
             value = item[2:].strip()
 
             if value:
-                domain_suffix.add(value)
+                domain_suffix.add(
+                    value
+                )
 
             continue
 
-        # 普通 DOMAIN
-        domains.add(item)
+        # DOMAIN
+        domains.add(
+            item
+        )
 
     rule = {}
 
     if domains:
-        rule["domain"] = sorted(domains)
+        rule["domain"] = sorted(
+            domains
+        )
 
     if domain_suffix:
         rule["domain_suffix"] = sorted(
@@ -171,51 +272,57 @@ def convert_domains(items: list[str]) -> dict:
 
 
 # ============================================================
-# IP-CIDR 转换
+# IP-CIDR
 # ============================================================
 
-def convert_ipcidr(items: list[str]) -> dict:
+def build_ipcidr_rule(items):
     """
-    Clash：
-
-        IP-CIDR
-        IP-CIDR6
-
-    统一转成 sing-box：
-
-        ip_cidr
+    将 IP 列表转换为 sing-box ip_cidr。
     """
 
     ip_cidr = set()
 
     for item in items:
-        item = item.strip()
 
-        if not item:
-            continue
+        normalized = (
+            normalize_ipcidr(
+                item
+            )
+        )
 
-        ip_cidr.add(item)
+        if normalized:
+            ip_cidr.add(
+                normalized
+            )
 
     if not ip_cidr:
         return {}
 
     return {
-        "ip_cidr": sorted(ip_cidr)
+        "ip_cidr": sorted(
+            ip_cidr
+        )
     }
 
 
 # ============================================================
-# sing-box Source Format
+# Source Format
 # ============================================================
 
-def make_source(rule: dict) -> dict:
+def build_source(rule):
     """
-    生成 sing-box Rule Set Source Format。
+    创建 sing-box Rule Set Source Format。
     """
 
     return {
-        "version": SING_BOX_RULESET_VERSION,
-        "rules": [rule] if rule else []
+        "version": (
+            SING_BOX_RULESET_VERSION
+        ),
+        "rules": (
+            [rule]
+            if rule
+            else []
+        ),
     }
 
 
@@ -223,23 +330,26 @@ def make_source(rule: dict) -> dict:
 # 查找 sing-box
 # ============================================================
 
-def find_sing_box() -> str | None:
+def find_sing_box():
     """
-    查找 sing-box 可执行文件。
+    查找 sing-box。
     """
 
-    path = shutil.which("sing-box")
+    path = shutil.which(
+        "sing-box"
+    )
 
     if path:
         return path
 
-    common_paths = (
+    candidates = [
         "/usr/local/bin/sing-box",
         "/usr/bin/sing-box",
         "./sing-box",
-    )
+    ]
 
-    for candidate in common_paths:
+    for candidate in candidates:
+
         p = Path(candidate)
 
         if p.is_file():
@@ -252,25 +362,27 @@ def find_sing_box() -> str | None:
 # 检查 sing-box
 # ============================================================
 
-def check_sing_box() -> str | None:
+def check_sing_box():
     """
-    检查 sing-box 是否可用。
+    检查 sing-box 是否存在。
     """
 
     sing_box = find_sing_box()
 
     if not sing_box:
+
         log(
-            "[ERROR] sing-box not found."
+            "[ERROR] sing-box not found"
         )
 
         return None
 
     try:
+
         result = subprocess.run(
             [
                 sing_box,
-                "version"
+                "version",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -279,29 +391,45 @@ def check_sing_box() -> str | None:
         )
 
     except OSError as e:
+
         log(
-            f"[ERROR] Failed to execute "
-            f"sing-box: {e}"
+            f"[ERROR] sing-box execute "
+            f"failed: {e}"
         )
 
         return None
 
     if result.returncode != 0:
+
         log(
-            "[ERROR] sing-box version check failed."
+            "[ERROR] sing-box version "
+            "check failed"
         )
 
         if result.stderr.strip():
-            log(result.stderr.strip())
+            log(
+                result.stderr.strip()
+            )
 
         return None
 
-    log("========================================")
-    log("sing-box")
-    log("========================================")
+    log(
+        "========================================"
+    )
+
+    log(
+        "sing-box"
+    )
+
+    log(
+        "========================================"
+    )
 
     if result.stdout.strip():
-        log(result.stdout.strip())
+
+        log(
+            result.stdout.strip()
+        )
 
     return sing_box
 
@@ -311,20 +439,22 @@ def check_sing_box() -> str | None:
 # ============================================================
 
 def compile_srs(
-    sing_box: str,
-    source_data: dict,
-    output_path: Path,
-) -> bool:
+    sing_box,
+    source_data,
+    output_path,
+):
     """
-    将 Source Format JSON 编译成 SRS。
+    使用：
 
-    临时 JSON 保存在系统临时目录，
-    不进入 Git 仓库。
+        sing-box rule-set compile
+
+    将 JSON 编译为 SRS。
     """
 
-    temp_path: Path | None = None
+    temp_path = None
 
     try:
+
         output_path.parent.mkdir(
             parents=True,
             exist_ok=True
@@ -346,18 +476,29 @@ def compile_srs(
                 source_data,
                 f,
                 ensure_ascii=False,
-                separators=(",", ":"),
+                separators=(
+                    ",",
+                    ":"
+                ),
             )
 
             f.write("\n")
 
-            temp_path = Path(f.name)
+            temp_path = Path(
+                f.name
+            )
 
         # ----------------------------------------------------
-        # 编译前删除旧 SRS
+        # 删除旧 SRS
         # ----------------------------------------------------
 
-        safe_remove(output_path)
+        safe_remove(
+            output_path
+        )
+
+        # ----------------------------------------------------
+        # 编译
+        # ----------------------------------------------------
 
         command = [
             sing_box,
@@ -382,30 +523,36 @@ def compile_srs(
         )
 
         if result.stdout.strip():
+
             log(
                 result.stdout.strip()
             )
 
         if result.returncode != 0:
+
             log(
-                f"[ERROR] Compile failed: "
+                f"[ERROR] SRS compile failed: "
                 f"{output_path}"
             )
 
             if result.stderr.strip():
+
                 log(
                     result.stderr.strip()
                 )
 
-            safe_remove(output_path)
+            safe_remove(
+                output_path
+            )
 
             return False
 
         # ----------------------------------------------------
-        # 验证输出
+        # 验证
         # ----------------------------------------------------
 
         if not output_path.is_file():
+
             log(
                 f"[ERROR] SRS not created: "
                 f"{output_path}"
@@ -416,12 +563,15 @@ def compile_srs(
         size = output_path.stat().st_size
 
         if size <= 0:
+
             log(
                 f"[ERROR] Empty SRS: "
                 f"{output_path}"
             )
 
-            safe_remove(output_path)
+            safe_remove(
+                output_path
+            )
 
             return False
 
@@ -433,92 +583,113 @@ def compile_srs(
         return True
 
     except OSError as e:
+
         log(
-            f"[ERROR] OS error while compiling "
+            f"[ERROR] OS error: "
             f"{output_path}: {e}"
         )
 
-        safe_remove(output_path)
+        safe_remove(
+            output_path
+        )
 
         return False
 
     except Exception as e:
+
         log(
-            f"[ERROR] Unexpected error "
-            f"while compiling {output_path}: {e}"
+            f"[ERROR] Unexpected error: "
+            f"{output_path}: {e}"
         )
 
-        safe_remove(output_path)
+        safe_remove(
+            output_path
+        )
 
         return False
 
     finally:
-        # ----------------------------------------------------
-        # 删除临时 JSON
-        # ----------------------------------------------------
 
         if temp_path is not None:
-            safe_remove(temp_path)
+
+            safe_remove(
+                temp_path
+            )
 
 
 # ============================================================
-# 处理 domains.list
+# Domain
 # ============================================================
 
 def process_domain(
-    sing_box: str,
-    source_path: Path,
-) -> tuple[bool, bool]:
+    sing_box,
+    source_path,
+):
     """
-    返回：
-
-        (是否成功生成, 是否跳过)
+    domains.list -> domains.srs
     """
 
-    output_path = source_path.with_suffix(".srs")
-
-    items = read_rule_file(source_path)
+    output_path = (
+        source_path.with_suffix(
+            ".srs"
+        )
+    )
 
     # --------------------------------------------------------
-    # 文件不存在
+    # 不存在
     # --------------------------------------------------------
 
     if not source_path.is_file():
-        safe_remove(output_path)
-        return False, True
+
+        safe_remove(
+            output_path
+        )
+
+        return True
 
     # --------------------------------------------------------
-    # 文件为空
+    # 读取
     # --------------------------------------------------------
+
+    items = read_list(
+        source_path
+    )
 
     if not items:
+
         log(
             f"[EMPTY] {source_path}"
         )
 
-        # 上游已经为空：
-        # 删除旧 SRS
-        safe_remove(output_path)
+        safe_remove(
+            output_path
+        )
 
-        return False, True
+        return True
 
     # --------------------------------------------------------
     # 转换
     # --------------------------------------------------------
 
-    rule = convert_domains(items)
+    rule = build_domain_rule(
+        items
+    )
 
     if not rule:
+
         log(
-            f"[EMPTY] {source_path} "
-            f"(no valid domain rules)"
+            f"[EMPTY] {source_path}"
         )
 
-        safe_remove(output_path)
+        safe_remove(
+            output_path
+        )
 
-        return False, True
+        return True
 
-    source_data = make_source(rule)
+    source_data = build_source(
+        rule
+    )
 
     log("")
     log(
@@ -529,69 +700,86 @@ def process_domain(
         f"         rules = {len(items)}"
     )
 
-    success = compile_srs(
+    return compile_srs(
         sing_box,
         source_data,
         output_path,
     )
 
-    return success, False
-
 
 # ============================================================
-# 处理 ipcidr.list
+# IP
 # ============================================================
 
 def process_ipcidr(
-    sing_box: str,
-    source_path: Path,
-) -> tuple[bool, bool]:
+    sing_box,
+    source_path,
+):
     """
-    处理 ipcidr.list。
+    ipcidr.list -> ipcidr.srs
     """
 
-    output_path = source_path.with_suffix(".srs")
-
-    items = read_rule_file(source_path)
+    output_path = (
+        source_path.with_suffix(
+            ".srs"
+        )
+    )
 
     # --------------------------------------------------------
-    # 文件不存在
+    # 不存在
     # --------------------------------------------------------
 
     if not source_path.is_file():
-        safe_remove(output_path)
-        return False, True
+
+        safe_remove(
+            output_path
+        )
+
+        return True
 
     # --------------------------------------------------------
-    # 文件为空
+    # 读取
     # --------------------------------------------------------
+
+    items = read_list(
+        source_path
+    )
 
     if not items:
+
         log(
             f"[EMPTY] {source_path}"
         )
 
-        safe_remove(output_path)
+        safe_remove(
+            output_path
+        )
 
-        return False, True
+        return True
 
     # --------------------------------------------------------
     # 转换
     # --------------------------------------------------------
 
-    rule = convert_ipcidr(items)
+    rule = build_ipcidr_rule(
+        items
+    )
 
     if not rule:
+
         log(
-            f"[EMPTY] {source_path} "
-            f"(no valid IP-CIDR rules)"
+            f"[EMPTY] {source_path}"
         )
 
-        safe_remove(output_path)
+        safe_remove(
+            output_path
+        )
 
-        return False, True
+        return True
 
-    source_data = make_source(rule)
+    source_data = build_source(
+        rule
+    )
 
     log("")
     log(
@@ -602,22 +790,20 @@ def process_ipcidr(
         f"         rules = {len(items)}"
     )
 
-    success = compile_srs(
+    return compile_srs(
         sing_box,
         source_data,
         output_path,
     )
 
-    return success, False
-
 
 # ============================================================
-# 扫描普通 Rule
+# 普通目录
 # ============================================================
 
 def process_normal_rules(
-    sing_box: str,
-) -> tuple[int, int]:
+    sing_box
+):
     """
     处理：
 
@@ -625,16 +811,11 @@ def process_normal_rules(
         Rule/<name>/ipcidr.list
     """
 
-    success_count = 0
-    skipped_count = 0
+    generated = 0
+    failed = 0
 
     if not BASE_DIR.is_dir():
-        log(
-            f"[ERROR] Rule directory not found: "
-            f"{BASE_DIR}"
-        )
-
-        return success_count, skipped_count
+        return generated, failed
 
     for directory in sorted(
         BASE_DIR.iterdir()
@@ -643,19 +824,24 @@ def process_normal_rules(
         if not directory.is_dir():
             continue
 
-        # Rule/Other 单独处理
         if directory.name == "Other":
             continue
 
         log("")
-        log("========================================")
+        log(
+            "========================================"
+        )
+
         log(
             f"Processing: {directory}"
         )
-        log("========================================")
+
+        log(
+            "========================================"
+        )
 
         # ----------------------------------------------------
-        # domains.list
+        # Domain
         # ----------------------------------------------------
 
         domain_file = (
@@ -664,74 +850,59 @@ def process_normal_rules(
 
         if domain_file.is_file():
 
-            success, skipped = process_domain(
+            result = process_domain(
                 sing_box,
-                domain_file,
+                domain_file
             )
 
-            if success:
-                success_count += 1
+            if result:
+                generated += 1
+            else:
+                failed += 1
 
-            if skipped:
-                skipped_count += 1
+        else:
 
-        elif (
-            directory / "domains.srs"
-        ).is_file():
-
-            # list 不存在，但旧 SRS 存在
-            log(
-                f"[ORPHAN] {directory / 'domains.srs'}"
-            )
-
+            # list 已删除
             safe_remove(
                 directory / "domains.srs"
             )
 
         # ----------------------------------------------------
-        # ipcidr.list
+        # IP
         # ----------------------------------------------------
 
-        ipcidr_file = (
+        ip_file = (
             directory / "ipcidr.list"
         )
 
-        if ipcidr_file.is_file():
+        if ip_file.is_file():
 
-            success, skipped = process_ipcidr(
+            result = process_ipcidr(
                 sing_box,
-                ipcidr_file,
+                ip_file
             )
 
-            if success:
-                success_count += 1
+            if result:
+                generated += 1
+            else:
+                failed += 1
 
-            if skipped:
-                skipped_count += 1
-
-        elif (
-            directory / "ipcidr.srs"
-        ).is_file():
-
-            # list 不存在，但旧 SRS 存在
-            log(
-                f"[ORPHAN] {directory / 'ipcidr.srs'}"
-            )
+        else:
 
             safe_remove(
                 directory / "ipcidr.srs"
             )
 
-    return success_count, skipped_count
+    return generated, failed
 
 
 # ============================================================
-# 扫描 Rule/Other
+# Rule/Other
 # ============================================================
 
 def process_other_rules(
-    sing_box: str,
-) -> tuple[int, int]:
+    sing_box
+):
     """
     处理：
 
@@ -739,20 +910,28 @@ def process_other_rules(
         Rule/Other/*-ipcidr.list
     """
 
-    success_count = 0
-    skipped_count = 0
+    generated = 0
+    failed = 0
 
     other_dir = (
         BASE_DIR / "Other"
     )
 
     if not other_dir.is_dir():
-        return success_count, skipped_count
+        return generated, failed
 
     log("")
-    log("========================================")
-    log("Processing: Rule/Other")
-    log("========================================")
+    log(
+        "========================================"
+    )
+
+    log(
+        "Processing: Rule/Other"
+    )
+
+    log(
+        "========================================"
+    )
 
     for source_path in sorted(
         other_dir.iterdir()
@@ -764,72 +943,63 @@ def process_other_rules(
         filename = source_path.name
 
         # ----------------------------------------------------
-        # domains
+        # Domain
         # ----------------------------------------------------
 
         if filename.endswith(
             "-domains.list"
         ):
 
-            success, skipped = process_domain(
+            result = process_domain(
                 sing_box,
-                source_path,
+                source_path
             )
 
-            if success:
-                success_count += 1
-
-            if skipped:
-                skipped_count += 1
+            if result:
+                generated += 1
+            else:
+                failed += 1
 
             continue
 
         # ----------------------------------------------------
-        # ipcidr
+        # IP
         # ----------------------------------------------------
 
         if filename.endswith(
             "-ipcidr.list"
         ):
 
-            success, skipped = process_ipcidr(
+            result = process_ipcidr(
                 sing_box,
-                source_path,
+                source_path
             )
 
-            if success:
-                success_count += 1
-
-            if skipped:
-                skipped_count += 1
+            if result:
+                generated += 1
+            else:
+                failed += 1
 
             continue
 
-    return success_count, skipped_count
+    return generated, failed
 
 
 # ============================================================
 # 清理孤立 SRS
 # ============================================================
 
-def cleanup_orphan_srs() -> int:
+def cleanup_orphan_srs():
     """
-    扫描整个 Rule 目录。
-
     如果：
 
         xxx.srs
 
-    但对应：
+    但：
 
         xxx.list
 
-    不存在，
-
-    则删除 xxx.srs。
-
-    这样即使旧版本脚本留下了 SRS，
-    也可以一次性清理掉。
+    不存在，删除 SRS。
     """
 
     deleted = 0
@@ -838,23 +1008,32 @@ def cleanup_orphan_srs() -> int:
         return deleted
 
     log("")
-    log("========================================")
-    log("Cleanup orphan SRS")
-    log("========================================")
+    log(
+        "========================================"
+    )
+
+    log(
+        "Cleanup orphan SRS"
+    )
+
+    log(
+        "========================================"
+    )
 
     for srs_path in sorted(
         BASE_DIR.rglob("*.srs")
     ):
 
         list_path = (
-            srs_path.with_suffix(".list")
+            srs_path.with_suffix(
+                ".list"
+            )
         )
 
         if not list_path.is_file():
 
             log(
-                f"[ORPHAN] "
-                f"{srs_path}"
+                f"[ORPHAN] {srs_path}"
             )
 
             safe_remove(
@@ -870,15 +1049,12 @@ def cleanup_orphan_srs() -> int:
 # 清理空目录
 # ============================================================
 
-def cleanup_empty_directories() -> None:
-    """
-    删除已经没有任何文件的规则目录。
-    """
+def cleanup_empty_dirs():
 
     if not BASE_DIR.is_dir():
         return
 
-    directories = sorted(
+    dirs = sorted(
         (
             p
             for p in BASE_DIR.rglob("*")
@@ -888,14 +1064,19 @@ def cleanup_empty_directories() -> None:
         reverse=True,
     )
 
-    for directory in directories:
+    for directory in dirs:
 
-        # Rule/Other 不删
-        if directory == BASE_DIR / "Other":
+        if directory == (
+            BASE_DIR / "Other"
+        ):
             continue
 
         try:
-            if not any(directory.iterdir()):
+
+            if not any(
+                directory.iterdir()
+            ):
+
                 directory.rmdir()
 
                 log(
@@ -908,52 +1089,47 @@ def cleanup_empty_directories() -> None:
 
 
 # ============================================================
-# 输出统计
+# 统计
 # ============================================================
 
-def show_statistics() -> int:
-    """
-    输出最终所有 SRS。
-    """
+def show_statistics():
 
     log("")
-    log("========================================")
-    log("SRS Statistics")
-    log("========================================")
+    log(
+        "========================================"
+    )
+
+    log(
+        "SRS Statistics"
+    )
+
+    log(
+        "========================================"
+    )
 
     if not BASE_DIR.is_dir():
-        log(
-            "No Rule directory."
-        )
-
         return 0
 
     files = sorted(
         BASE_DIR.rglob("*.srs")
     )
 
-    if not files:
-        log(
-            "No SRS files."
-        )
-
-        return 0
-
     total_size = 0
 
     for path in files:
+
         size = path.stat().st_size
 
         total_size += size
 
         log(
-            f"{path}: "
+            f"{path} "
             f"{size:,} bytes"
         )
 
     log("")
     log(
-        f"SRS files : {len(files)}"
+        f"SRS count : {len(files)}"
     )
 
     log(
@@ -967,23 +1143,31 @@ def show_statistics() -> int:
 # Main
 # ============================================================
 
-def main() -> int:
-
-    log("========================================")
-    log("Clash-rule -> sing-box SRS")
-    log("========================================")
+def main():
 
     log(
-        f"Rule directory : {BASE_DIR}"
+        "========================================"
     )
 
     log(
-        f"Rule Set version: "
+        "Clash-rule -> sing-box SRS"
+    )
+
+    log(
+        "========================================"
+    )
+
+    log(
+        f"Rule directory: {BASE_DIR}"
+    )
+
+    log(
+        f"Rule version: "
         f"{SING_BOX_RULESET_VERSION}"
     )
 
     # --------------------------------------------------------
-    # 检查 sing-box
+    # sing-box
     # --------------------------------------------------------
 
     sing_box = check_sing_box()
@@ -992,13 +1176,14 @@ def main() -> int:
         return 1
 
     # --------------------------------------------------------
-    # 检查 Rule
+    # Rule
     # --------------------------------------------------------
 
     if not BASE_DIR.is_dir():
+
         log(
-            f"[ERROR] Directory not found: "
-            f"{BASE_DIR}"
+            f"[ERROR] Rule directory "
+            f"not found: {BASE_DIR}"
         )
 
         return 1
@@ -1007,7 +1192,7 @@ def main() -> int:
     # 普通规则
     # --------------------------------------------------------
 
-    normal_success, normal_skipped = (
+    normal_generated, normal_failed = (
         process_normal_rules(
             sing_box
         )
@@ -1017,14 +1202,14 @@ def main() -> int:
     # Other
     # --------------------------------------------------------
 
-    other_success, other_skipped = (
+    other_generated, other_failed = (
         process_other_rules(
             sing_box
         )
     )
 
     # --------------------------------------------------------
-    # 清理孤立 SRS
+    # 孤立 SRS
     # --------------------------------------------------------
 
     orphan_deleted = (
@@ -1032,63 +1217,75 @@ def main() -> int:
     )
 
     # --------------------------------------------------------
-    # 清理空目录
+    # 空目录
     # --------------------------------------------------------
 
-    cleanup_empty_directories()
+    cleanup_empty_dirs()
 
     # --------------------------------------------------------
-    # 最终统计
+    # 统计
     # --------------------------------------------------------
+
+    total_generated = (
+        normal_generated
+        + other_generated
+    )
+
+    total_failed = (
+        normal_failed
+        + other_failed
+    )
 
     srs_count = show_statistics()
-
-    total_success = (
-        normal_success +
-        other_success
-    )
-
-    total_skipped = (
-        normal_skipped +
-        other_skipped
-    )
 
     # --------------------------------------------------------
     # Summary
     # --------------------------------------------------------
 
     log("")
-    log("========================================")
-    log("Summary")
-    log("========================================")
-
     log(
-        f"Generated : {total_success}"
+        "========================================"
     )
 
     log(
-        f"Skipped   : {total_skipped}"
+        "Summary"
     )
 
     log(
-        f"Orphan del: {orphan_deleted}"
+        "========================================"
     )
 
     log(
-        f"SRS total : {srs_count}"
+        f"Processed: {total_generated}"
     )
 
-    # --------------------------------------------------------
-    # 没有任何 SRS
-    #
-    # 注意：
-    # 这里不因为“全部为空”就认为失败。
-    #
-    # 例如所有上游规则真的被清空，
-    # 这是一个合法状态。
-    # --------------------------------------------------------
+    log(
+        f"Failed   : {total_failed}"
+    )
+
+    log(
+        f"Orphan   : {orphan_deleted}"
+    )
+
+    log(
+        f"SRS total: {srs_count}"
+    )
 
     log("")
+
+    # --------------------------------------------------------
+    # 某个文件编译失败不能静默成功
+    # --------------------------------------------------------
+
+    if total_failed > 0:
+
+        log(
+            "[ERROR] One or more SRS "
+            "files failed to compile."
+        )
+
+        return 1
+
     log(
         "[DONE] SRS generation completed."
     )
@@ -1097,8 +1294,10 @@ def main() -> int:
 
 
 # ============================================================
-# Entry Point
+# Entry
 # ============================================================
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(
+        main()
+    )
