@@ -1,3 +1,4 @@
+```yaml
 name: Build Rules
 
 on:
@@ -14,91 +15,216 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      # ======================================================
+      # Checkout
+      # ======================================================
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      # ======================================================
+      # Python
+      # ======================================================
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      # ======================================================
+      # Python dependencies
+      # ======================================================
+      - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install requests pyyaml
 
+      # ======================================================
+      # Generate .list
+      # ======================================================
       - name: Generate rules
-        run: |
-          python .github/scripts/rules.py
-
-      # ==========================================
-      # 安装 Mihomo
-      # ==========================================
-      - name: Install mihomo
         run: |
           set -e
 
+          echo "========================================"
+          echo "Generate rules"
+          echo "========================================"
+
+          python .github/scripts/rules.py
+
+      # ======================================================
+      # Install Mihomo
+      #
+      # 注意：
+      # 绝对不能执行：
+      #
+      #   mihomo
+      #   mihomo version
+      #
+      # 否则 Mihomo 会进入核心运行模式。
+      #
+      # 这里仅下载二进制并使用：
+      #
+      #   mihomo -v
+      #
+      # 检查版本。
+      # ======================================================
+      - name: Install Mihomo
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Install Mihomo"
+          echo "========================================"
+
           API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 
-          ASSET_URL=$(curl -fsSL "$API_URL" \
-            | grep browser_download_url \
-            | grep linux-amd64 \
-            | grep -v sha256 \
-            | head -n 1 \
-            | cut -d '"' -f 4)
+          ASSET_URL=$(
+            curl -fsSL "$API_URL" |
+            jq -r '
+              .assets[]
+              | select(
+                  .name
+                  | test(
+                      "^mihomo-linux-amd64-compatible-.*\\.gz$"
+                    )
+                )
+              | .browser_download_url
+            ' |
+            head -n 1
+          )
 
-          echo "Mihomo:"
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "ERROR: Mihomo asset not found"
+            exit 1
+          fi
+
+          echo "Download:"
           echo "$ASSET_URL"
 
-          curl -fL "$ASSET_URL" -o /tmp/mihomo.gz
+          rm -f \
+            /tmp/mihomo.gz \
+            /tmp/mihomo
 
-          gunzip /tmp/mihomo.gz
+          curl \
+            -fL \
+            --retry 3 \
+            --retry-delay 2 \
+            "$ASSET_URL" \
+            -o /tmp/mihomo.gz
 
-          mv /tmp/mihomo /usr/local/bin/mihomo
+          gunzip -f /tmp/mihomo.gz
 
-          chmod +x /usr/local/bin/mihomo
+          install \
+            -m 0755 \
+            /tmp/mihomo \
+            /usr/local/bin/mihomo
 
-          mihomo version
+          echo
+          echo "===== Mihomo version ====="
 
-          # 最小测试
-          echo "example.com" > /tmp/test.txt
+          mihomo -v
 
-          mihomo convert-ruleset \
+      # ======================================================
+      # Verify Mihomo convert-ruleset
+      #
+      # 使用最小规则测试，防止下载到错误文件。
+      # ======================================================
+      - name: Verify Mihomo
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Verify Mihomo convert-ruleset"
+          echo "========================================"
+
+          rm -f \
+            /tmp/test.txt \
+            /tmp/test.mrs
+
+          printf '%s\n' "example.com" > /tmp/test.txt
+
+          mihomo \
+            convert-ruleset \
             domain \
             text \
             /tmp/test.txt \
             /tmp/test.mrs
 
-      # ==========================================
-      # 生成 Mihomo MRS
-      # ==========================================
-      - name: Convert all rules to MRS
+          test -s /tmp/test.mrs
+
+          echo
+          echo "Mihomo convert-ruleset OK"
+
+          ls -lh /tmp/test.mrs
+
+      # ======================================================
+      # Convert .list -> .mrs
+      # ======================================================
+      - name: Convert rules to MRS
         run: |
           set -e
 
+          echo "========================================"
+          echo "Convert rules to MRS"
+          echo "========================================"
+
           convert() {
-            type="$1"
-            src="$2"
-            dst="$3"
+            local type="$1"
+            local src="$2"
+            local dst="$3"
 
-            if [ -f "$src" ] && grep -q '[^[:space:]]' "$src"; then
-              echo "[MRS] $src -> $dst"
+            if [ -f "$src" ]; then
+              if grep -q '[^[:space:]]' "$src"; then
 
-              mihomo convert-ruleset \
-                "$type" \
-                text \
-                "$src" \
-                "$dst"
+                echo
+                echo "[MRS]"
+                echo "  Type: $type"
+                echo "  Src : $src"
+                echo "  Dst : $dst"
+
+                mihomo \
+                  convert-ruleset \
+                  "$type" \
+                  text \
+                  "$src" \
+                  "$dst"
+
+                if [ ! -s "$dst" ]; then
+                  echo "ERROR: MRS file is empty: $dst"
+                  exit 1
+                fi
+
+              else
+
+                echo "[EMPTY] $src"
+
+                # 上游为空时删除旧 MRS
+                rm -f "$dst"
+              fi
+
             else
-              echo "[SKIP] $src"
+
+              echo "[MISSING] $src"
+
+              # list 已经不存在时删除旧 MRS
+              rm -f "$dst"
             fi
           }
 
+          # ==================================================
           # Rule/<name>/
+          # ==================================================
+
           for d in Rule/*; do
+
             [ -d "$d" ] || continue
 
-            # Other 单独处理
-            [ "$(basename "$d")" = "Other" ] && continue
+            # Rule/Other 使用另外的文件结构
+            if [ "$(basename "$d")" = "Other" ]; then
+              continue
+            fi
 
             convert \
               domain \
@@ -109,91 +235,220 @@ jobs:
               ipcidr \
               "$d/ipcidr.list" \
               "$d/ipcidr.mrs"
+
           done
 
+          # ==================================================
           # Rule/Other/
-          echo "=== Convert Rule/Other flat rules ==="
+          # ==================================================
 
-          for f in Rule/Other/*-domains.list; do
-            [ -f "$f" ] || continue
+          if [ -d "Rule/Other" ]; then
 
-            convert \
-              domain \
-              "$f" \
-              "${f%.list}.mrs"
-          done
+            echo
+            echo "========================================"
+            echo "Convert Rule/Other domains"
+            echo "========================================"
 
-          for f in Rule/Other/*-ipcidr.list; do
-            [ -f "$f" ] || continue
+            for f in Rule/Other/*-domains.list; do
 
-            convert \
-              ipcidr \
-              "$f" \
-              "${f%.list}.mrs"
-          done
+              [ -f "$f" ] || continue
 
-      # ==========================================
-      # 安装 sing-box
-      # ==========================================
+              convert \
+                domain \
+                "$f" \
+                "${f%.list}.mrs"
+
+            done
+
+            echo
+            echo "========================================"
+            echo "Convert Rule/Other ipcidr"
+            echo "========================================"
+
+            for f in Rule/Other/*-ipcidr.list; do
+
+              [ -f "$f" ] || continue
+
+              convert \
+                ipcidr \
+                "$f" \
+                "${f%.list}.mrs"
+
+            done
+
+          fi
+
+      # ======================================================
+      # Install sing-box
+      #
+      # 自动获取最新稳定版。
+      # 不使用 alpha / beta / rc。
+      # ======================================================
       - name: Install sing-box
         run: |
           set -e
 
+          echo "========================================"
+          echo "Install sing-box"
+          echo "========================================"
+
           API_URL="https://api.github.com/repos/SagerNet/sing-box/releases"
 
           VERSION=$(
-            curl -fsSL "$API_URL" \
-            | jq -r '
-                .[]
-                | select(.prerelease == false)
-                | .tag_name
-              ' \
-            | head -n 1
+            curl -fsSL "$API_URL" |
+            jq -r '
+              .[]
+              | select(.prerelease == false)
+              | .tag_name
+            ' |
+            head -n 1
           )
 
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-            echo "Failed to get sing-box version"
+            echo "ERROR: Failed to determine sing-box version"
             exit 1
           fi
 
+          VERSION_NO_V="${VERSION#v}"
+
           echo "sing-box version: $VERSION"
 
-          ASSET_NAME="sing-box-${VERSION#v}-linux-amd64.tar.gz"
+          ASSET_NAME="sing-box-${VERSION_NO_V}-linux-amd64.tar.gz"
 
           DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/${ASSET_NAME}"
 
           echo "Download:"
           echo "$DOWNLOAD_URL"
 
-          curl -fL \
+          rm -rf /tmp/sing-box
+          mkdir -p /tmp/sing-box
+
+          curl \
+            -fL \
+            --retry 3 \
+            --retry-delay 2 \
             "$DOWNLOAD_URL" \
             -o /tmp/sing-box.tar.gz
 
-          mkdir -p /tmp/sing-box
-
-          tar -xzf \
+          tar \
+            -xzf \
             /tmp/sing-box.tar.gz \
             -C /tmp/sing-box \
             --strip-components=1
+
+          test -f /tmp/sing-box/sing-box
 
           install \
             -m 0755 \
             /tmp/sing-box/sing-box \
             /usr/local/bin/sing-box
 
+          echo
+          echo "===== sing-box version ====="
+
           sing-box version
 
-      # ==========================================
-      # 生成 sing-box SRS
-      # ==========================================
-      - name: Convert all rules to SRS
+      # ======================================================
+      # Verify sing-box rule-set compile
+      # ======================================================
+      - name: Verify sing-box
         run: |
           set -e
 
-          python .github/scripts/srs.py
+          echo "========================================"
+          echo "Verify sing-box rule-set compile"
+          echo "========================================"
+
+          rm -f \
+            /tmp/test-srs.json \
+            /tmp/test.srs
+
+          cat > /tmp/test-srs.json <<'JSON'
+          {
+            "version": 2,
+            "rules": [
+              {
+                "domain": [
+                  "example.com"
+                ]
+              }
+            ]
+          }
+          JSON
+
+          sing-box \
+            rule-set \
+            compile \
+            --output \
+            /tmp/test.srs \
+            /tmp/test-srs.json
+
+          test -s /tmp/test.srs
 
           echo
-          echo "===== Generated SRS ====="
+          echo "sing-box rule-set compile OK"
+
+          ls -lh /tmp/test.srs
+
+      # ======================================================
+      # Generate SRS
+      #
+      # 使用 .list 直接生成临时 JSON：
+      #
+      # domains.list
+      #      ↓
+      # domain / domain_suffix
+      #      ↓
+      # 临时 JSON
+      #      ↓
+      # sing-box
+      #      ↓
+      # domains.srs
+      #
+      # JSON 不进入 Git。
+      # ======================================================
+      - name: Convert rules to SRS
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Convert rules to SRS"
+          echo "========================================"
+
+          python .github/scripts/srs.py
+
+      # ======================================================
+      # 最终检查
+      # ======================================================
+      - name: Verify generated files
+        run: |
+          set -e
+
+          echo
+          echo "========================================"
+          echo "Generated files"
+          echo "========================================"
+
+          echo
+          echo "===== LIST ====="
+
+          find Rule \
+            -type f \
+            -name "*.list" \
+            -print \
+            | sort
+
+          echo
+          echo "===== MRS ====="
+
+          find Rule \
+            -type f \
+            -name "*.mrs" \
+            -print \
+            | sort
+
+          echo
+          echo "===== SRS ====="
 
           find Rule \
             -type f \
@@ -202,25 +457,72 @@ jobs:
             | sort
 
           echo
-          echo "===== SRS Sizes ====="
+          echo "===== File count ====="
 
+          echo "LIST:"
+          find Rule \
+            -type f \
+            -name "*.list" \
+            | wc -l
+
+          echo "MRS:"
+          find Rule \
+            -type f \
+            -name "*.mrs" \
+            | wc -l
+
+          echo "SRS:"
           find Rule \
             -type f \
             -name "*.srs" \
-            -exec ls -lh {} \;
+            | wc -l
 
-      # ==========================================
-      # 提交
-      # ==========================================
-      - name: Commit & Push
+      # ======================================================
+      # Git status
+      # ======================================================
+      - name: Show Git changes
         run: |
-          git config user.name github-actions
-          git config user.email actions@github.com
-
-          git add Rule
+          echo "========================================"
+          echo "Git changes"
+          echo "========================================"
 
           git status --short
 
-          git commit -m "Update rules" || exit 0
+      # ======================================================
+      # Commit & Push
+      # ======================================================
+      - name: Commit & Push
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Commit & Push"
+          echo "========================================"
+
+          git config \
+            user.name \
+            "github-actions[bot]"
+
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A Rule
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          echo
+          echo "===== Staged changes ====="
+
+          git diff \
+            --cached \
+            --stat
+
+          git commit \
+            -m "Update rules"
 
           git push
+```
