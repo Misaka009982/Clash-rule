@@ -3,6 +3,7 @@ name: Build Rules
 on:
   schedule:
     - cron: "58 * * * *"
+
   workflow_dispatch:
 
 permissions:
@@ -22,11 +23,16 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install requests pyyaml
+        run: |
+          pip install requests pyyaml
 
       - name: Generate rules
-        run: python .github/scripts/rules.py
+        run: |
+          python .github/scripts/rules.py
 
+      # ==========================================
+      # 安装 Mihomo
+      # ==========================================
       - name: Install mihomo
         run: |
           set -e
@@ -34,23 +40,38 @@ jobs:
           API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 
           ASSET_URL=$(curl -fsSL "$API_URL" \
-          | grep browser_download_url \
-          | grep linux-amd64 \
-          | grep -v sha256 \
-          | head -n 1 \
-          | cut -d '"' -f 4)
+            | grep browser_download_url \
+            | grep linux-amd64 \
+            | grep -v sha256 \
+            | head -n 1 \
+            | cut -d '"' -f 4)
+
+          echo "Mihomo:"
+          echo "$ASSET_URL"
 
           curl -fL "$ASSET_URL" -o /tmp/mihomo.gz
+
           gunzip /tmp/mihomo.gz
+
           mv /tmp/mihomo /usr/local/bin/mihomo
+
           chmod +x /usr/local/bin/mihomo
 
+          mihomo version
 
-          # ✅ 用最小规则测试 convert-ruleset（不会启动核心）
+          # 最小测试
           echo "example.com" > /tmp/test.txt
-          mihomo convert-ruleset domain text /tmp/test.txt /tmp/test.mrs
 
-      - name: Convert all rules (safe)
+          mihomo convert-ruleset \
+            domain \
+            text \
+            /tmp/test.txt \
+            /tmp/test.mrs
+
+      # ==========================================
+      # 生成 Mihomo MRS
+      # ==========================================
+      - name: Convert all rules to MRS
         run: |
           set -e
 
@@ -59,34 +80,147 @@ jobs:
             src="$2"
             dst="$3"
 
-            if grep -q '[^[:space:]]' "$src"; then
-              mihomo convert-ruleset "$type" text "$src" "$dst"
+            if [ -f "$src" ] && grep -q '[^[:space:]]' "$src"; then
+              echo "[MRS] $src -> $dst"
+
+              mihomo convert-ruleset \
+                "$type" \
+                text \
+                "$src" \
+                "$dst"
             else
-              echo "Skip empty $src"
+              echo "[SKIP] $src"
             fi
           }
 
+          # Rule/<name>/
           for d in Rule/*; do
             [ -d "$d" ] || continue
-            convert domain "$d/domains.list" "$d/domains.mrs" || true
-            convert ipcidr "$d/ipcidr.list" "$d/ipcidr.mrs" || true
+
+            # Other 单独处理
+            [ "$(basename "$d")" = "Other" ] && continue
+
+            convert \
+              domain \
+              "$d/domains.list" \
+              "$d/domains.mrs"
+
+            convert \
+              ipcidr \
+              "$d/ipcidr.list" \
+              "$d/ipcidr.mrs"
           done
 
+          # Rule/Other/
           echo "=== Convert Rule/Other flat rules ==="
+
           for f in Rule/Other/*-domains.list; do
-          [ -f "$f" ] || continue
-          convert domain "$f" "${f%.list}.mrs"
+            [ -f "$f" ] || continue
+
+            convert \
+              domain \
+              "$f" \
+              "${f%.list}.mrs"
           done
 
           for f in Rule/Other/*-ipcidr.list; do
-          [ -f "$f" ] || continue
-          convert ipcidr "$f" "${f%.list}.mrs"
+            [ -f "$f" ] || continue
+
+            convert \
+              ipcidr \
+              "$f" \
+              "${f%.list}.mrs"
           done
 
+      # ==========================================
+      # 安装 sing-box
+      # ==========================================
+      - name: Install sing-box
+        run: |
+          set -e
+
+          API_URL="https://api.github.com/repos/SagerNet/sing-box/releases"
+
+          VERSION=$(
+            curl -fsSL "$API_URL" \
+            | jq -r '
+                .[]
+                | select(.prerelease == false)
+                | .tag_name
+              ' \
+            | head -n 1
+          )
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "Failed to get sing-box version"
+            exit 1
+          fi
+
+          echo "sing-box version: $VERSION"
+
+          ASSET_NAME="sing-box-${VERSION#v}-linux-amd64.tar.gz"
+
+          DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/${ASSET_NAME}"
+
+          echo "Download:"
+          echo "$DOWNLOAD_URL"
+
+          curl -fL \
+            "$DOWNLOAD_URL" \
+            -o /tmp/sing-box.tar.gz
+
+          mkdir -p /tmp/sing-box
+
+          tar -xzf \
+            /tmp/sing-box.tar.gz \
+            -C /tmp/sing-box \
+            --strip-components=1
+
+          install \
+            -m 0755 \
+            /tmp/sing-box/sing-box \
+            /usr/local/bin/sing-box
+
+          sing-box version
+
+      # ==========================================
+      # 生成 sing-box SRS
+      # ==========================================
+      - name: Convert all rules to SRS
+        run: |
+          set -e
+
+          python .github/scripts/srs.py
+
+          echo
+          echo "===== Generated SRS ====="
+
+          find Rule \
+            -type f \
+            -name "*.srs" \
+            -print \
+            | sort
+
+          echo
+          echo "===== SRS Sizes ====="
+
+          find Rule \
+            -type f \
+            -name "*.srs" \
+            -exec ls -lh {} \;
+
+      # ==========================================
+      # 提交
+      # ==========================================
       - name: Commit & Push
         run: |
           git config user.name github-actions
           git config user.email actions@github.com
+
           git add Rule
+
+          git status --short
+
           git commit -m "Update rules" || exit 0
+
           git push
