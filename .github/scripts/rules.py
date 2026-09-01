@@ -1,4 +1,3 @@
-```python
 import os
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -809,4 +808,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
